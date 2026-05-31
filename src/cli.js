@@ -926,6 +926,10 @@ function profileIndexPath(home) {
   return path.join(profileDir(home), PROFILE_INDEX);
 }
 
+function authSnapshotPath(home) {
+  return path.join(profileDir(home), "auth-official.snapshot.json");
+}
+
 async function readTextIfPresent(filePath, fallback = null) {
   try {
     return await fs.readFile(filePath, "utf8");
@@ -1113,14 +1117,19 @@ function buildPresets(summary) {
       kind: "official",
       note: "Built-in OpenAI provider, authenticated via auth.json (ChatGPT login). No custom block.",
       // Built-in openai must NOT have a custom block; just point model_provider at it.
-      fields: { modelProvider: "openai" }
+      fields: { modelProvider: "openai" },
+      // Restore the official auth.json captured before the third-party detour.
+      auth: { action: "restore" }
     },
     {
       id: "thirdparty",
       label: "Third-party relay",
       kind: "third-party",
       note: `Custom provider "${relayId}" in config.toml with a bearer token, no auth.`,
-      fields: { modelProvider: relayId, baseUrl: relayUrl, wireApi: "responses", requiresOpenaiAuth: false, bearer: "keep" }
+      fields: { modelProvider: relayId, baseUrl: relayUrl, wireApi: "responses", requiresOpenaiAuth: false, bearer: "keep" },
+      // Snapshot official auth.json, then overwrite it with an apikey-only file
+      // built from the relay bearer in config.toml.
+      auth: { action: "override-apikey", source: "bearer" }
     }
   ];
 }
@@ -1228,6 +1237,30 @@ async function writeConfigFile(home, file, content, { execute }) {
   return { dryRun: false, file: file ?? "config", path: filePath, backupDir };
 }
 
+// Snapshot the current (official) auth.json so it can be restored verbatim after
+// a third-party detour. We capture only once: an existing snapshot is the trusted
+// official state and must not be clobbered by an already-third-party auth.json.
+async function saveAuthSnapshot(home, { force = false } = {}) {
+  const snapshotPath = authSnapshotPath(home);
+  if (!force && (await pathExists(snapshotPath))) return { saved: false, reason: "exists" };
+  const raw = await readTextIfPresent(authPath(home), null);
+  if (raw === null) return { saved: false, reason: "no-auth" };
+  await fs.mkdir(profileDir(home), { recursive: true });
+  await fs.writeFile(snapshotPath, raw);
+  return { saved: true, path: snapshotPath };
+}
+
+// Restore the official auth.json from the snapshot, then drop the snapshot so the
+// next third-party switch captures a fresh one.
+async function restoreAuthSnapshot(home) {
+  const snapshotPath = authSnapshotPath(home);
+  const raw = await readTextIfPresent(snapshotPath, null);
+  if (raw === null) return { restored: false, reason: "no-snapshot" };
+  await fs.writeFile(authPath(home), raw);
+  await fs.rm(snapshotPath, { force: true });
+  return { restored: true, path: authPath(home) };
+}
+
 async function readProfileIndex(home) {
   const index = await readJsonIfPresent(profileIndexPath(home), null);
   return Array.isArray(index?.profiles) ? index.profiles : [];
@@ -1305,7 +1338,55 @@ async function deleteProfile(home, id, { execute }) {
   return { dryRun: false, deleted: true, profile: entry };
 }
 
-async function applyConfig(home, { fields, profileId }, { execute }) {
+// Decide what (if anything) a preset's `auth` directive will do to auth.json.
+// `resultingConfig` is the config.toml text *after* field edits, so the bearer we
+// read is the one the relay will actually use. No writes happen here — the result
+// drives both the dry-run preview and the execute step.
+async function planAuthAction(home, auth, resultingConfig) {
+  if (!auth || !auth.action) return null;
+  if (auth.action === "restore") {
+    const hasSnapshot = await pathExists(authSnapshotPath(home));
+    return {
+      action: "restore",
+      willChange: hasSnapshot,
+      change: { scope: "auth", key: "auth.json", before: "(third-party)", after: hasSnapshot ? "(restored official)" : "(no snapshot — unchanged)" }
+    };
+  }
+  if (auth.action === "override-apikey") {
+    const bearer = summarizeConfig(resultingConfig).bearer?.value || "";
+    if (!bearer) {
+      return {
+        action: "override-apikey",
+        willChange: false,
+        note: "No experimental_bearer_token in config.toml; auth.json left unchanged.",
+        change: { scope: "auth", key: "auth.json", before: "(unchanged)", after: "(skipped — no bearer)" }
+      };
+    }
+    return {
+      action: "override-apikey",
+      willChange: true,
+      bearer,
+      change: { scope: "auth", key: "auth.json", before: "(official)", after: "OPENAI_API_KEY only" }
+    };
+  }
+  return null;
+}
+
+// Execute the planned auth action. For override we snapshot the official auth.json
+// (once) before overwriting it with an apikey-only file.
+async function runAuthAction(home, plan) {
+  if (!plan || !plan.willChange) return;
+  if (plan.action === "restore") {
+    await restoreAuthSnapshot(home);
+    return;
+  }
+  if (plan.action === "override-apikey") {
+    await saveAuthSnapshot(home); // no-op if a snapshot already exists
+    await fs.writeFile(authPath(home), `${JSON.stringify({ OPENAI_API_KEY: plan.bearer }, null, 2)}\n`);
+  }
+}
+
+async function applyConfig(home, { fields, profileId, auth }, { execute }) {
   const text = await readTextIfPresent(configPath(home), "") ?? "";
 
   if (profileId) {
@@ -1322,16 +1403,21 @@ async function applyConfig(home, { fields, profileId }, { execute }) {
   }
 
   const { text: nextText, changes } = applyConfigFields(text, fields ?? {});
-  const masked = maskChanges(changes);
+  const authPlan = await planAuthAction(home, auth, nextText);
+  const authChanges = authPlan?.change ? [authPlan.change] : [];
+  const masked = [...maskChanges(changes), ...authChanges];
+
   if (!execute) {
-    return { dryRun: true, mode: "fields", changes: masked };
+    return { dryRun: true, mode: "fields", changes: masked, note: authPlan?.note };
   }
-  if (!changes.length) {
-    return { dryRun: false, mode: "fields", changes: [], noOp: true };
+  // Nothing changes in either file — report a no-op.
+  if (!changes.length && !authPlan?.willChange) {
+    return { dryRun: false, mode: "fields", changes: [], noOp: true, note: authPlan?.note };
   }
   const backupDir = await createBackup(home, "config-fields", []);
-  await fs.writeFile(configPath(home), nextText);
-  return { dryRun: false, mode: "fields", changes: masked, backupDir };
+  if (changes.length) await fs.writeFile(configPath(home), nextText);
+  await runAuthAction(home, authPlan);
+  return { dryRun: false, mode: "fields", changes: masked, backupDir, note: authPlan?.note };
 }
 
 function renameProviderInText(text, fromId, toId) {
@@ -1513,6 +1599,7 @@ function printConfigApplyResult(result, execute) {
   if (execute) {
     if (result.noOp) {
       console.log("No changes; config already matches.");
+      if (result.note) console.log(color(COLOR.yellow, result.note));
       return;
     }
     printKeyValues([
@@ -1520,6 +1607,7 @@ function printConfigApplyResult(result, execute) {
       ["Mode", result.mode],
       ["Backup", result.backupDir ? compactPath(result.backupDir) : "none"]
     ]);
+    if (result.note) console.log(color(COLOR.yellow, result.note));
     if (result.backupDir) printNext(`codex-chat-manager restore ${shellQuote(result.backupDir)} --yes`);
     return;
   }
@@ -1540,6 +1628,7 @@ function printConfigApplyResult(result, execute) {
   } else {
     console.log(color(COLOR.gray, "No changes."));
   }
+  if (result.note) console.log(color(COLOR.yellow, result.note));
 }
 
 function configFieldsFromFlags(flags) {
@@ -1856,17 +1945,19 @@ async function main() {
 
   if (command === "config-apply") {
     let fields = configFieldsFromFlags(flags);
+    let authDirective;
     if (flags.preset) {
       const overview = await getConfigOverview(home);
       const preset = overview.presets.find((item) => item.id === flags.preset);
       if (!preset) throw new Error(`Unknown preset: ${flags.preset}`);
       fields = { ...preset.fields, ...fields };
+      authDirective = preset.auth;
     }
     const profileId = typeof flags.profile === "string" ? flags.profile : undefined;
-    if (!profileId && Object.keys(fields).length === 0) {
+    if (!profileId && Object.keys(fields).length === 0 && !authDirective) {
       throw new Error("config-apply needs --preset, --profile, or field flags");
     }
-    const result = await applyConfig(home, { fields, profileId }, { execute });
+    const result = await applyConfig(home, { fields, profileId, auth: authDirective }, { execute });
     asJson ? printJson(result) : printConfigApplyResult(result, execute);
     return;
   }

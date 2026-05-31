@@ -240,6 +240,63 @@ test("config-apply thirdparty preset creates a custom provider block", async () 
   assert.match(after, /requires_openai_auth = false/);
 });
 
+test("thirdparty preset overwrites auth.json with an apikey-only file and snapshots the official one", async () => {
+  // SAMPLE_CONFIG carries experimental_bearer_token = "sk-secrettoken1234567890".
+  const home = await makeConfigHome();
+  const result = JSON.parse((await runCli(["config-apply", "--preset", "thirdparty", "--codex-home", home, "--json", "--yes"])).stdout);
+
+  // auth.json now holds only the relay key from config's experimental_bearer_token.
+  const auth = JSON.parse(await fs.readFile(path.join(home, "auth.json"), "utf8"));
+  assert.deepEqual(auth, { OPENAI_API_KEY: "sk-secrettoken1234567890" });
+
+  // The official auth.json is snapshotted for later restore.
+  const snapshot = JSON.parse(await fs.readFile(path.join(home, "chat-manager-profiles", "auth-official.snapshot.json"), "utf8"));
+  assert.equal(snapshot.auth_mode, "chatgpt");
+
+  // The change list reports the auth.json override.
+  assert.ok(result.changes.some((c) => c.scope === "auth"));
+});
+
+test("switching official restores the original auth.json verbatim and consumes the snapshot", async () => {
+  const home = await makeConfigHome();
+  const original = await fs.readFile(path.join(home, "auth.json"), "utf8");
+
+  await runCli(["config-apply", "--preset", "thirdparty", "--codex-home", home, "--json", "--yes"]);
+  await runCli(["config-apply", "--preset", "official", "--codex-home", home, "--json", "--yes"]);
+
+  // auth.json is byte-for-byte the original official login.
+  const restored = await fs.readFile(path.join(home, "auth.json"), "utf8");
+  assert.equal(restored, original);
+  assert.equal(JSON.parse(restored).auth_mode, "chatgpt");
+
+  // Snapshot is consumed on restore.
+  assert.equal(await exists(path.join(home, "chat-manager-profiles", "auth-official.snapshot.json")), false);
+});
+
+test("thirdparty switch without a bearer leaves auth.json untouched and reports it", async () => {
+  const noBearer = 'model_provider = "openai"\nmodel = "gpt-5.5"\n';
+  const home = await makeConfigHome(noBearer);
+  const result = JSON.parse((await runCli(["config-apply", "--preset", "thirdparty", "--codex-home", home, "--json", "--yes"])).stdout);
+
+  // auth.json is unchanged (still the chatgpt login) and no snapshot was taken.
+  const auth = JSON.parse(await fs.readFile(path.join(home, "auth.json"), "utf8"));
+  assert.equal(auth.auth_mode, "chatgpt");
+  assert.equal(await exists(path.join(home, "chat-manager-profiles", "auth-official.snapshot.json")), false);
+  assert.match(result.note ?? "", /bearer|unchanged/i);
+});
+
+test("thirdparty dry-run plans the auth.json override without writing it", async () => {
+  const home = await makeConfigHome();
+  const preview = JSON.parse((await runCli(["config-apply", "--preset", "thirdparty", "--codex-home", home, "--json"])).stdout);
+  assert.equal(preview.dryRun, true);
+  assert.ok(preview.changes.some((c) => c.scope === "auth"));
+
+  // Nothing was written: auth.json untouched, no snapshot.
+  const auth = JSON.parse(await fs.readFile(path.join(home, "auth.json"), "utf8"));
+  assert.equal(auth.auth_mode, "chatgpt");
+  assert.equal(await exists(path.join(home, "chat-manager-profiles", "auth-official.snapshot.json")), false);
+});
+
 test("config-fix renames a reserved [model_providers.openai] block and guards raw writes", async () => {
   const reserved = 'model_provider = "openai"\nmodel = "gpt-5.5"\n\n[model_providers.openai]\nname = "openai"\nbase_url = "https://api.axis.fan"\nrequires_openai_auth = false\n';
   const home = await makeConfigHome(reserved);
