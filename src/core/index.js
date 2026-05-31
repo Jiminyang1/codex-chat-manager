@@ -1110,6 +1110,10 @@ function providerIdFromConfigText(text) {
   return providerId;
 }
 
+function assertCustomProviderConfig(text) {
+  providerIdFromConfigText(text);
+}
+
 
 async function readAuthSummary(home) {
   const auth = await readJsonIfPresent(authPath(home), null);
@@ -1442,6 +1446,9 @@ async function writeProfileFile(home, profileId, file, content, { execute }) {
     }
   } else {
     assertNoReservedProviderBlock(content);
+    if (entry.kind !== "official") {
+      assertCustomProviderConfig(content);
+    }
   }
   const filePath = path.join(profileDir(home), `${entry.id}.${safeFile === "auth" ? "auth.json" : "toml"}`);
   if (!execute) {
@@ -1679,6 +1686,9 @@ async function switchProfile(home, profileId, { execute }) {
   if (!entry) throw new Error(`Profile not found: ${profileId}`);
   const configSnapshot = await readTextIfPresent(path.join(profileDir(home), `${profileId}.toml`), null);
   if (configSnapshot === null) throw new Error(`Profile config missing: ${profileId}`);
+  if (entry.kind !== "official") {
+    assertCustomProviderConfig(configSnapshot);
+  }
   const authSnapshot = await readTextIfPresent(path.join(profileDir(home), `${profileId}.auth.json`), null);
   const willWriteAuth = authSnapshot !== null;
 

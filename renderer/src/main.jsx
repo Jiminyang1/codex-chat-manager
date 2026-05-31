@@ -392,6 +392,7 @@ function App() {
         `Running process: ${status.processes.map((proc) => proc.pid).join(", ")}`
       ].join("\n"),
       confirmLabel: "Quit and continue",
+      tone: "primary",
       action: async () => {
         try {
           await invoke("codex:quit", { codexHome });
@@ -616,7 +617,7 @@ function App() {
                 <div className="pane-head"><div><h1>Backups</h1><p>{backups.length} restorable snapshots</p></div></div>
                 <div className="rows">
                   {backups.map((backup) => (
-                    <button className="row" key={backup.path} onClick={() => setModal({ title: "Restore backup", body: `${backup.reason || "backup"}\n${new Date(backup.createdAt).toLocaleString()}`, action: () => runMutation("backup:restore", { backupDir: backup.path }, "Backup restored") })} type="button">
+                    <button className="row" key={backup.path} onClick={() => setModal({ title: "Restore backup", body: `${backup.reason || "backup"}\n${new Date(backup.createdAt).toLocaleString()}`, confirmLabel: "Restore", tone: "danger", action: () => runMutation("backup:restore", { backupDir: backup.path }, "Backup restored") })} type="button">
                       <div className="row-main"><strong>{backup.reason || "backup"}</strong><span>{backup.threadIds.length} chats · {shortPath(backup.path)}</span></div>
                       <ArchiveRestore size={15} />
                     </button>
@@ -638,10 +639,10 @@ function App() {
 
           <aside className="detail-pane">
             {view === "chats" && selectedThread && (
-              <ThreadDetail thread={selectedThread} selectedProject={selectedProject} onDeleteThread={() => setModal({ title: "Delete chat", body: `${selectedThread.title || "(untitled)"}\n${shortPath(selectedThread.cwd)}`, action: () => runMutation("thread:trash", { threadId: selectedThread.id }, "Chat moved to backup") })} onDeleteProject={() => selectedProject && setModal({ title: "Delete project", body: `${shortPath(selectedProject)}\nAll exact-cwd chats move into a restorable backup.`, action: () => runMutation("project:delete", { project: selectedProject }, "Project deleted") })} />
+              <ThreadDetail thread={selectedThread} selectedProject={selectedProject} onDeleteThread={() => setModal({ title: "Delete chat", body: `${selectedThread.title || "(untitled)"}\n${shortPath(selectedThread.cwd)}`, confirmLabel: "Delete", tone: "danger", action: () => runMutation("thread:trash", { threadId: selectedThread.id }, "Chat moved to backup") })} onDeleteProject={() => selectedProject && setModal({ title: "Delete project", body: `${shortPath(selectedProject)}\nAll exact-cwd chats move into a restorable backup.`, confirmLabel: "Delete", tone: "danger", action: () => runMutation("project:delete", { project: selectedProject }, "Project deleted") })} />
             )}
             {view === "providers" && (
-              <ProviderDetail item={selectedProviderItem} config={config} repairCount={repairCount} retagCount={retagCount} files={providerFiles} expandedFiles={expandedFiles} setExpandedFiles={setExpandedFiles} onUseOfficial={() => setModal({ title: "Switch to OpenAI Official", body: officialSwitchMessage(config?.officialAuthSnapshot), action: () => runMutation("provider:useOfficial", {}, "Switched to OpenAI Official") })} onUseProfile={(profile) => setModal({ title: `Switch to ${profile.label}`, body: profile.hasAuth ? "This writes config.toml and auth.json from the profile snapshot." : "This writes config.toml. auth.json is unchanged.", action: () => runMutation("profile:switch", { profileId: profile.id }, "Profile switched") })} onEdit={openProfileEditor} onDelete={(profile) => setModal({ title: "Delete profile", body: `Delete saved profile \"${profile.label}\"?`, action: () => runMutation("profile:delete", { id: profile.id }, "Profile deleted") })} onExplainSync={() => setModal({ title: "Sync modes", body: ["Repair mismatches updates only chats where SQLite and rollout metadata disagree. It keeps each chat on its original provider tag.", "", "Retag all changes every chat outside the active provider to the current provider id. This makes hidden chats visible here, but overwrites previous provider tags.", "", "Both modes create a restorable backup first."].join("\n"), confirmLabel: "Close", action: () => setModal(null) })} onRepair={() => setModal({ title: "Repair provider mismatches", body: `Repair ${repairCount} chat(s). This does not merge provider tags.`, action: () => runMutation("config:sync", { mode: "repair" }, "Provider mismatches repaired") })} onRetag={() => setModal({ title: "Retag all chats", body: `Retag ${retagCount} chat(s) to ${activeProvider}. Previous provider tags will be overwritten.`, action: () => runMutation("config:sync", { mode: "retag" }, "Chats retagged") })} />
+              <ProviderDetail item={selectedProviderItem} config={config} repairCount={repairCount} retagCount={retagCount} files={providerFiles} expandedFiles={expandedFiles} setExpandedFiles={setExpandedFiles} onUseOfficial={() => setModal({ title: "Switch to OpenAI Official", body: officialSwitchMessage(config?.officialAuthSnapshot), confirmLabel: "Switch", tone: "primary", action: () => runMutation("provider:useOfficial", {}, "Switched to OpenAI Official") })} onUseProfile={(profile) => setModal({ title: `Switch to ${profile.label}`, body: profile.hasAuth ? "This writes config.toml and auth.json from the profile snapshot." : "This writes config.toml. auth.json is unchanged.", confirmLabel: "Switch", tone: "primary", action: () => runMutation("profile:switch", { profileId: profile.id }, "Profile switched") })} onEdit={openProfileEditor} onDelete={(profile) => setModal({ title: "Delete profile", body: `Delete saved profile \"${profile.label}\"?`, confirmLabel: "Delete", tone: "danger", action: () => runMutation("profile:delete", { id: profile.id }, "Profile deleted") })} onExplainSync={() => setModal({ title: "Sync modes", body: ["Repair mismatches updates only chats where SQLite and rollout metadata disagree. It keeps each chat on its original provider tag.", "", "Retag all changes every chat outside the active provider to the current provider id. This makes hidden chats visible here, but overwrites previous provider tags.", "", "Both modes create a restorable backup first."].join("\n"), confirmLabel: "Close", tone: "primary", hideCancel: true, action: () => setModal(null) })} onRepair={() => setModal({ title: "Repair provider mismatches", body: `Repair ${repairCount} chat(s). This does not merge provider tags.`, confirmLabel: "Repair", tone: "primary", action: () => runMutation("config:sync", { mode: "repair" }, "Provider mismatches repaired") })} onRetag={() => setModal({ title: "Retag all chats", body: `Retag ${retagCount} chat(s) to ${activeProvider}. Previous provider tags will be overwritten.`, confirmLabel: "Retag", tone: "danger", action: () => runMutation("config:sync", { mode: "retag" }, "Chats retagged") })} />
             )}
             {view === "backups" && <div className="detail-empty"><ArchiveRestore size={28} /><p>Select a backup to restore it.</p></div>}
             {view === "settings" && <StatusPanel status={status} />}
@@ -883,16 +884,35 @@ function StatusPanel({ status }) {
 }
 
 function ConfirmModal({ modal, onCancel }) {
-  return <div className="modal"><div className="modal-card"><h2>{modal.title}</h2><pre>{modal.body}</pre><div className="actions end"><button onClick={onCancel} type="button">Cancel</button><button className="danger" onClick={modal.action} type="button">{modal.confirmLabel ?? "Confirm"}</button></div></div></div>;
+  const tone = modal.tone === "danger" ? "danger" : "primary";
+  return (
+    <div className="modal">
+      <div className="modal-card">
+        <h2>{modal.title}</h2>
+        <pre>{modal.body}</pre>
+        <div className="actions end">
+          {!modal.hideCancel && <button onClick={onCancel} type="button">Cancel</button>}
+          <button className={tone} onClick={modal.action} type="button">{modal.confirmLabel ?? "Confirm"}</button>
+        </div>
+      </div>
+    </div>
+  );
 }
 
 function ProfileEditor({ editor, setEditor, onCancel, onSave }) {
   const value = editor.drafts[editor.tab] ?? "";
+  const providerId = providerIdFromConfig(editor.drafts.config);
   return (
     <div className="modal">
       <div className="modal-card editor">
         <h2>Edit {editor.profile.label}</h2>
         <div className="segmented"><button className={editor.tab === "config" ? "active" : ""} onClick={() => setEditor({ ...editor, tab: "config" })} type="button">config.toml</button><button className={editor.tab === "auth" ? "active" : ""} onClick={() => setEditor({ ...editor, tab: "auth" })} type="button">auth.json</button></div>
+        {editor.tab === "config" && (
+          <label className="field">
+            <span>Provider ID</span>
+            <input value={providerId} placeholder="from config.toml" readOnly />
+          </label>
+        )}
         <textarea value={value} onChange={(event) => setEditor({ ...editor, drafts: { ...editor.drafts, [editor.tab]: event.target.value } })} spellCheck="false" />
         <div className="actions end"><button onClick={onCancel} type="button">Cancel</button><button className="primary" onClick={onSave} type="button">Save</button></div>
       </div>

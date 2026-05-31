@@ -757,6 +757,34 @@ test("profile file API rejects unknown and unsafe profile ids", async () => {
   );
 });
 
+test("profile file API rejects invalid third-party provider configs", async () => {
+  const home = await makeConfigHome();
+  const created = await invokeAction("provider:create", {
+    codexHome: home,
+    label: "Axis",
+    configText: 'model_provider = "axis"\nmodel = "gpt-5.5"\n\n[model_providers.axis]\nname = "axis"\nbase_url = "https://api.axis.fan"\nwire_api = "responses"\n',
+    authText: '{ "OPENAI_API_KEY": "sk-axis" }\n',
+    switch: false
+  });
+
+  await assert.rejects(
+    invokeAction("profile:file:write", {
+      codexHome: home,
+      profileId: created.profile.id,
+      file: "config",
+      content: 'model = "gpt-5.5"\n',
+      confirmed: true
+    }),
+    /must set model_provider/
+  );
+
+  await fs.writeFile(path.join(home, "chat-manager-profiles", `${created.profile.id}.toml`), 'model = "gpt-5.5"\n');
+  await assert.rejects(
+    invokeAction("profile:switch", { codexHome: home, profileId: created.profile.id, confirmed: true }),
+    /must set model_provider/
+  );
+});
+
 test("app API and preload action whitelist reject unknown actions", async () => {
   await assert.rejects(invokeAction("bad:action", {}), /Unknown action/);
   const preload = await fs.readFile(path.join(root, "electron", "preload.cjs"), "utf8");
