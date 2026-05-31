@@ -25,7 +25,7 @@ From a local checkout:
 ```bash
 npm install
 npm test
-npm run web
+npm run electron:dev
 ```
 
 This tool understands the current Codex storage model:
@@ -52,11 +52,31 @@ Close Codex Desktop before running mutation commands for the cleanest result. If
 
 The tool refuses to mutate a thread if `threads.rollout_path` points outside the selected `--codex-home`. This matters when testing against a copied SQLite database: Codex stores absolute rollout paths, so a fixture copy must rewrite those paths or the tool will stop instead of touching the real home.
 
-## Commands
+## Desktop App
 
-Web UI:
+Development app:
 
 ```bash
+npm run electron:dev
+```
+
+This starts the Vite renderer and opens the Electron app. The desktop app uses an IPC bridge, so it does not depend on the local web server.
+
+Browser build:
+
+```bash
+npm run build:renderer
+npm run web
+```
+
+Then open `http://127.0.0.1:8765`.
+
+## Commands
+
+Web UI, after building the renderer:
+
+```bash
+npm run build:renderer
 npm run web
 # or, after global install:
 codex-chat-manager web

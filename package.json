@@ -8,8 +8,11 @@
   },
   "files": [
     "src",
+    "electron",
+    "renderer",
     "public",
     "docs",
+    "vite.config.js",
     "README.md",
     "LICENSE",
     "CHANGELOG.md"
@@ -17,8 +20,12 @@
   "scripts": {
     "start": "node src/server.js",
     "web": "node src/server.js",
+    "dev:renderer": "vite --host 127.0.0.1",
+    "electron": "electron electron/main.js",
+    "electron:dev": "concurrently -k -s first -n renderer,electron \"npm:dev:renderer\" \"wait-on http://127.0.0.1:5173 && electron electron/main.js\"",
     "status": "node src/cli.js status",
     "test": "node --test",
+    "build:renderer": "vite build",
     "pack:check": "npm pack --dry-run"
   },
   "engines": {
@@ -31,5 +38,15 @@
     "sqlite",
     "local-first"
   ],
-  "license": "MIT"
+  "license": "MIT",
+  "dependencies": {
+    "@vitejs/plugin-react": "^6.0.2",
+    "concurrently": "^9.2.1",
+    "electron": "^42.3.0",
+    "lucide-react": "^1.17.0",
+    "react": "^19.2.6",
+    "react-dom": "^19.2.6",
+    "vite": "^8.0.14",
+    "wait-on": "^9.0.3"
+  }
 }
