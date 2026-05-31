@@ -502,6 +502,18 @@ test("config-sync repair mode does not merge provider tags", async () => {
   assert.equal(afterMeta.payload.model_provider, "axis");
 });
 
+test("config-sync repair mode human output is mode-aware", async () => {
+  const fixture = await makeFixture();
+  const preview = await runCli(["config-sync", "--mode", "repair", "--codex-home", fixture.home]);
+  assert.match(preview.stdout, /Chats to repair/);
+  assert.doesNotMatch(preview.stdout, /Chats to retag/);
+  assert.match(preview.stdout, /config-sync --mode repair --yes/);
+
+  const result = await runCli(["config-sync", "--mode", "repair", "--codex-home", fixture.home, "--yes"]);
+  assert.match(result.stdout, /Nothing to repair/);
+  assert.doesNotMatch(result.stdout, /null/);
+});
+
 test("config-show exposes the full bearer token and api key for editing", async () => {
   const home = await makeConfigHome();
   const overview = JSON.parse((await runCli(["config-show", "--codex-home", home, "--json"])).stdout);

@@ -82,7 +82,8 @@ ${color(COLOR.cyan, "Config / provider switching")}
   profile-switch | switch <profile-id>
   config-save-profile <label> [--note TEXT]
   config-delete-profile <profile-id>
-  config-sync | sync [--to <provider-id>]   Retag all chats to the active provider so history stays visible
+  config-sync | sync [--mode repair|retag] [--to <provider-id>]
+                                 Repair SQLite/rollout mismatches or retag chats to the active provider
   config-fix | fix-reserved [--to <id>]     Rename a reserved [model_providers.openai] block to a custom id
 
 ${color(COLOR.cyan, "Options")}
@@ -243,14 +244,18 @@ function parseArgs(argv) {
 
 function printConfigSyncResult(result, execute) {
   printTitle(execute ? "Synced Chat Providers" : "Sync Preview");
+  const isRepair = result.mode === "repair";
   if (execute) {
     if (result.noOp) {
-      console.log(`Nothing to sync; all chats already use "${result.target}".`);
+      console.log(isRepair
+        ? "Nothing to repair; SQLite and rollout provider metadata already match."
+        : `Nothing to sync; all chats already use "${result.target}".`);
       return;
     }
     printKeyValues([
-      ["Target provider", result.target],
-      ["Chats retagged", color(COLOR.green, result.updated)],
+      ["Sync mode", isRepair ? "repair mismatches" : "retag to current"],
+      ["Target provider", result.target ?? "-"],
+      [isRepair ? "Chats repaired" : "Chats retagged", color(COLOR.green, result.updated)],
       ["SQLite rows", result.dbUpdated ?? result.updated],
       ["Rollouts", result.rolloutUpdated ?? 0],
       ["Backup", result.backupDir ? compactPath(result.backupDir) : "none"]
@@ -260,9 +265,9 @@ function printConfigSyncResult(result, execute) {
   }
   printKeyValues([
     ["Mode", color(COLOR.yellow, "preview")],
-    ["Sync mode", result.mode === "repair" ? "repair mismatches" : "retag to current"],
+    ["Sync mode", isRepair ? "repair mismatches" : "retag to current"],
     ["Target provider", result.target ?? "-"],
-    ["Chats to retag", result.total]
+    [isRepair ? "Chats to repair" : "Chats to retag", result.total]
   ]);
   if (result.groups?.length) {
     console.log("");
@@ -271,7 +276,7 @@ function printConfigSyncResult(result, execute) {
       { key: "count", label: "Chats", align: "right" }
     ], result.groups);
   }
-  printNext("codex-chat-manager config-sync --yes");
+  printNext(`codex-chat-manager config-sync${isRepair ? " --mode repair" : ""} --yes`);
 }
 
 function printConfigOverview(overview) {
