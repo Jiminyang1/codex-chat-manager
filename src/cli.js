@@ -11,6 +11,15 @@ const execFileAsync = promisify(execFile);
 const DB_NAME = "state_5.sqlite";
 const GLOBAL_STATE = ".codex-global-state.json";
 const BACKUP_ROOT = "backups_state/chat-manager";
+const CONFIG_NAME = "config.toml";
+const AUTH_NAME = "auth.json";
+const PROFILE_DIR = "chat-manager-profiles";
+const PROFILE_INDEX = "profiles.json";
+const OFFICIAL_BASE_URL = "https://api.openai.com/v1";
+const DEFAULT_RELAY_BASE_URL = "https://api.axis.fan";
+const DEFAULT_RELAY_PROVIDER_ID = "openai-custom";
+// Codex reserves these provider ids; a custom [model_providers.<id>] block cannot override them.
+const BUILTIN_PROVIDER_IDS = new Set(["openai"]);
 
 const COLOR = {
   reset: "\x1b[0m",
@@ -62,6 +71,16 @@ ${color(COLOR.cyan, "Commands")}
   restore <backup-dir-or-#number>
   web [--port 8765]
 
+${color(COLOR.cyan, "Config / provider switching")}
+  config | cfg
+  config-apply --preset official|thirdparty
+  config-apply --base-url URL --requires-auth false --bearer KEEP|REMOVE|TOKEN
+  config-apply --profile <profile-id>
+  config-save-profile <label> [--note TEXT]
+  config-delete-profile <profile-id>
+  config-sync | sync [--to <provider-id>]   Retag all chats to the active provider so history stays visible
+  config-fix | fix-reserved [--to <id>]     Rename a reserved [model_providers.openai] block to a custom id
+
 ${color(COLOR.cyan, "Options")}
   --codex-home PATH   Use another Codex home, default ~/.codex
   --json              Print machine-readable JSON
@@ -85,7 +104,15 @@ function normalizeCommand(command) {
     "rm-provider": "trash-provider",
     "rm-project": "delete-project",
     serve: "web",
-    ui: "web"
+    ui: "web",
+    config: "config-show",
+    cfg: "config-show",
+    "save-profile": "config-save-profile",
+    "delete-profile": "config-delete-profile",
+    sync: "config-sync",
+    "sync-provider": "config-sync",
+    "fix-reserved": "config-fix",
+    "fix-provider": "config-fix"
   };
   return aliases[command] ?? command;
 }
@@ -282,7 +309,14 @@ async function pathExists(filePath) {
 }
 
 function openDb(home, options = {}) {
-  return new DatabaseSync(dbPath(home), options);
+  const db = new DatabaseSync(dbPath(home), options);
+  // Tolerate Codex Desktop holding the DB: wait for the lock instead of failing.
+  try {
+    db.exec("PRAGMA busy_timeout = 4000");
+  } catch {
+    // Read-only or older builds may reject this; safe to ignore.
+  }
+  return db;
 }
 
 function getColumns(db, table) {
@@ -874,6 +908,652 @@ async function restoreBackup(home, backupDir, execute) {
   return { dryRun: false, backupDir: source, preRestoreBackup: backupBeforeRestore, restoredFiles };
 }
 
+// --- Config / provider switching ----------------------------------------
+
+function configPath(home) {
+  return path.join(home, CONFIG_NAME);
+}
+
+function authPath(home) {
+  return path.join(home, AUTH_NAME);
+}
+
+function profileDir(home) {
+  return path.join(home, PROFILE_DIR);
+}
+
+function profileIndexPath(home) {
+  return path.join(profileDir(home), PROFILE_INDEX);
+}
+
+async function readTextIfPresent(filePath, fallback = null) {
+  try {
+    return await fs.readFile(filePath, "utf8");
+  } catch (error) {
+    if (error?.code === "ENOENT") return fallback;
+    throw error;
+  }
+}
+
+function escapeRegex(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function maskToken(value) {
+  const text = String(value ?? "");
+  if (text.length <= 12) return text ? "****" : "";
+  return `${text.slice(0, 7)}…${text.slice(-4)}`;
+}
+
+function parseTomlScalar(raw) {
+  const value = String(raw).trim();
+  if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
+    return value.slice(1, -1);
+  }
+  if (value === "true") return true;
+  if (value === "false") return false;
+  if (/^-?\d+$/.test(value)) return Number.parseInt(value, 10);
+  return value;
+}
+
+function formatTomlValue(value) {
+  if (typeof value === "boolean") return value ? "true" : "false";
+  if (typeof value === "number") return String(value);
+  return JSON.stringify(String(value));
+}
+
+function isTableHeader(line) {
+  return /^\s*\[/.test(line);
+}
+
+function tableHeaderName(line) {
+  const match = line.match(/^\s*\[([^\]]+)\]\s*$/);
+  return match ? match[1].trim() : null;
+}
+
+function providerKeyFromHeader(header) {
+  const match = header.match(/^model_providers\.(.+)$/);
+  if (!match) return null;
+  let key = match[1].trim();
+  if (key.startsWith('"') && key.endsWith('"')) key = key.slice(1, -1);
+  return key;
+}
+
+function topLevelRange(lines) {
+  for (let i = 0; i < lines.length; i += 1) {
+    if (isTableHeader(lines[i])) return [0, i];
+  }
+  return [0, lines.length];
+}
+
+function providerRange(lines, key) {
+  for (let i = 0; i < lines.length; i += 1) {
+    const header = tableHeaderName(lines[i]);
+    if (header && providerKeyFromHeader(header) === key) {
+      let end = lines.length;
+      for (let j = i + 1; j < lines.length; j += 1) {
+        if (isTableHeader(lines[j])) {
+          end = j;
+          break;
+        }
+      }
+      return [i, end];
+    }
+  }
+  return null;
+}
+
+function readScalarInRange(lines, start, end, key) {
+  const re = new RegExp(`^\\s*${escapeRegex(key)}\\s*=\\s*(.+?)\\s*$`);
+  for (let i = start; i < end; i += 1) {
+    const match = lines[i].match(re);
+    if (match) return parseTomlScalar(match[1]);
+  }
+  return undefined;
+}
+
+function setScalarInRange(lines, start, end, key, value, insertAt) {
+  const re = new RegExp(`^(\\s*)${escapeRegex(key)}\\s*=`);
+  for (let i = start; i < end; i += 1) {
+    const match = lines[i].match(re);
+    if (match) {
+      if (value === null) {
+        lines.splice(i, 1);
+        return { changed: true, removed: true };
+      }
+      const next = `${match[1]}${key} = ${formatTomlValue(value)}`;
+      const changed = next !== lines[i];
+      lines[i] = next;
+      return { changed };
+    }
+  }
+  if (value === null) return { changed: false };
+  lines.splice(insertAt ?? end, 0, `${key} = ${formatTomlValue(value)}`);
+  return { changed: true, inserted: true };
+}
+
+function summarizeConfig(text) {
+  const lines = text.split("\n");
+  const [topStart, topEnd] = topLevelRange(lines);
+  const model = readScalarInRange(lines, topStart, topEnd, "model");
+  const modelProvider = readScalarInRange(lines, topStart, topEnd, "model_provider");
+  const bearer = readScalarInRange(lines, topStart, topEnd, "experimental_bearer_token");
+  let provider = null;
+  if (modelProvider) {
+    const range = providerRange(lines, modelProvider);
+    if (range) {
+      const [ps, pe] = range;
+      provider = {
+        key: modelProvider,
+        name: readScalarInRange(lines, ps, pe, "name") ?? null,
+        baseUrl: readScalarInRange(lines, ps, pe, "base_url") ?? null,
+        wireApi: readScalarInRange(lines, ps, pe, "wire_api") ?? null,
+        requiresOpenaiAuth: readScalarInRange(lines, ps, pe, "requires_openai_auth") ?? null,
+        envKey: readScalarInRange(lines, ps, pe, "env_key") ?? null
+      };
+    }
+  }
+  return {
+    model: model ?? null,
+    modelProvider: modelProvider ?? null,
+    provider,
+    bearer: bearer
+      ? { present: true, masked: maskToken(bearer), value: String(bearer) }
+      : { present: false, masked: "", value: "" }
+  };
+}
+
+function providerKind(provider, modelProvider) {
+  // The distinction is the auth mode, not the URL:
+  //   official    = requires_openai_auth = true  (Codex auth.json / ChatGPT login)
+  //   third-party = requires_openai_auth = false (config.toml base_url + bearer, no auth)
+  if (provider) {
+    if (provider.requiresOpenaiAuth === true) return "official";
+    if (provider.requiresOpenaiAuth === false) return "third-party";
+  }
+  // No custom block: a built-in id (e.g. openai) means the official, auth-based provider.
+  if (modelProvider && BUILTIN_PROVIDER_IDS.has(modelProvider)) return "official";
+  return "unknown";
+}
+
+function isReservedProviderId(id) {
+  return BUILTIN_PROVIDER_IDS.has(id);
+}
+
+function findReservedProviderBlocks(text) {
+  const found = [];
+  for (const id of BUILTIN_PROVIDER_IDS) {
+    const re = new RegExp(`^\\s*\\[model_providers\\.(?:"${escapeRegex(id)}"|${escapeRegex(id)})\\]`, "m");
+    if (re.test(text)) found.push(id);
+  }
+  return found;
+}
+
+function assertNoReservedProviderBlock(text) {
+  for (const id of BUILTIN_PROVIDER_IDS) {
+    const re = new RegExp(`^\\s*\\[model_providers\\.(?:"${escapeRegex(id)}"|${escapeRegex(id)})\\]`, "m");
+    if (re.test(text)) {
+      throw new Error(`config.toml defines [model_providers.${id}], but "${id}" is a reserved built-in provider that cannot be overridden. Rename it to a custom id (e.g. ${DEFAULT_RELAY_PROVIDER_ID}).`);
+    }
+  }
+}
+
+function buildPresets(summary) {
+  const provider = summary.provider ?? {};
+  const kind = providerKind(provider, summary.modelProvider);
+  const relayUrl = kind === "third-party" && provider.baseUrl ? provider.baseUrl : DEFAULT_RELAY_BASE_URL;
+  // Re-use the current custom id when it is already a valid (non-reserved) third-party id.
+  const relayId = summary.modelProvider && !isReservedProviderId(summary.modelProvider)
+    ? summary.modelProvider
+    : DEFAULT_RELAY_PROVIDER_ID;
+  return [
+    {
+      id: "official",
+      label: "Official OpenAI",
+      kind: "official",
+      note: "Built-in OpenAI provider, authenticated via auth.json (ChatGPT login). No custom block.",
+      // Built-in openai must NOT have a custom block; just point model_provider at it.
+      fields: { modelProvider: "openai" }
+    },
+    {
+      id: "thirdparty",
+      label: "Third-party relay",
+      kind: "third-party",
+      note: `Custom provider "${relayId}" in config.toml with a bearer token, no auth.`,
+      fields: { modelProvider: relayId, baseUrl: relayUrl, wireApi: "responses", requiresOpenaiAuth: false, bearer: "keep" }
+    }
+  ];
+}
+
+function applyConfigFields(text, fields) {
+  const lines = text.split("\n");
+  const changes = [];
+  const summary = summarizeConfig(text);
+  const providerKey = fields.modelProvider ?? summary.modelProvider;
+
+  const editTop = (key, value) => {
+    const [start, end] = topLevelRange(lines);
+    const before = readScalarInRange(lines, start, end, key);
+    const result = setScalarInRange(lines, start, end, key, value, end);
+    if (result.changed) changes.push({ scope: "top", key, before: before ?? null, after: value });
+  };
+  const ensureProviderBlock = () => {
+    if (providerRange(lines, providerKey)) return;
+    if (isReservedProviderId(providerKey)) {
+      throw new Error(`"${providerKey}" is a reserved built-in provider and cannot have a custom [model_providers] block. Use a custom id like ${DEFAULT_RELAY_PROVIDER_ID}.`);
+    }
+    if (lines.length && lines[lines.length - 1].trim() !== "") lines.push("");
+    lines.push(`[model_providers.${providerKey}]`, `name = "${providerKey}"`);
+    changes.push({ scope: "provider", key: "[block]", before: null, after: providerKey });
+  };
+  const editProvider = (key, value) => {
+    ensureProviderBlock();
+    const [start, end] = providerRange(lines, providerKey);
+    const before = readScalarInRange(lines, start, end, key);
+    const result = setScalarInRange(lines, start, end, key, value, start + 1);
+    if (result.changed) changes.push({ scope: "provider", key, before: before ?? null, after: value });
+  };
+
+  const hasProviderFields = ["baseUrl", "wireApi", "requiresOpenaiAuth", "envKey"]
+    .some((key) => fields[key] !== undefined);
+
+  if (fields.modelProvider !== undefined) editTop("model_provider", fields.modelProvider);
+  if (fields.model !== undefined) editTop("model", fields.model);
+  if (hasProviderFields) {
+    if (fields.baseUrl !== undefined) editProvider("base_url", fields.baseUrl);
+    if (fields.wireApi !== undefined) editProvider("wire_api", fields.wireApi);
+    if (fields.requiresOpenaiAuth !== undefined) editProvider("requires_openai_auth", fields.requiresOpenaiAuth);
+    if (fields.envKey !== undefined) editProvider("env_key", fields.envKey);
+  }
+  if (fields.bearer !== undefined && fields.bearer !== "keep") {
+    editTop("experimental_bearer_token", fields.bearer === "remove" ? null : fields.bearer);
+  }
+
+  const nextText = lines.join("\n");
+  assertNoReservedProviderBlock(nextText);
+  return { text: nextText, changes };
+}
+
+function maskChanges(changes) {
+  return changes.map((change) => {
+    if (change.key !== "experimental_bearer_token") return change;
+    return {
+      ...change,
+      before: change.before ? maskToken(change.before) : change.before,
+      after: typeof change.after === "string" ? maskToken(change.after) : change.after
+    };
+  });
+}
+
+async function readAuthSummary(home) {
+  const auth = await readJsonIfPresent(authPath(home), null);
+  if (!auth) return { exists: false, mode: null, hasApiKey: false, apiKey: null };
+  return {
+    exists: true,
+    mode: auth.auth_mode ?? null,
+    hasApiKey: Boolean(auth.OPENAI_API_KEY),
+    apiKey: auth.OPENAI_API_KEY ?? null
+  };
+}
+
+function configFilePath(home, file) {
+  if (file === "auth") return authPath(home);
+  if (file === "config" || file === undefined) return configPath(home);
+  throw new Error(`Unknown file "${file}"; use config or auth`);
+}
+
+async function readConfigFile(home, file) {
+  const filePath = configFilePath(home, file);
+  const raw = await readTextIfPresent(filePath, null);
+  return { file: file ?? "config", path: filePath, exists: raw !== null, raw: raw ?? "" };
+}
+
+async function writeConfigFile(home, file, content, { execute }) {
+  const filePath = configFilePath(home, file);
+  if (file === "auth") {
+    try {
+      JSON.parse(content);
+    } catch (error) {
+      throw new Error(`Refusing to save: auth.json is not valid JSON (${error.message})`);
+    }
+  }
+  if (file !== "auth") {
+    assertNoReservedProviderBlock(content);
+  }
+  if (!execute) {
+    return { dryRun: true, file: file ?? "config", path: filePath, bytes: Buffer.byteLength(content, "utf8") };
+  }
+  const backupDir = await createBackup(home, `config-file-write:${file ?? "config"}`, []);
+  await fs.writeFile(filePath, content);
+  return { dryRun: false, file: file ?? "config", path: filePath, backupDir };
+}
+
+async function readProfileIndex(home) {
+  const index = await readJsonIfPresent(profileIndexPath(home), null);
+  return Array.isArray(index?.profiles) ? index.profiles : [];
+}
+
+async function writeProfileIndex(home, profiles) {
+  await fs.mkdir(profileDir(home), { recursive: true });
+  await fs.writeFile(profileIndexPath(home), `${JSON.stringify({ version: 1, profiles }, null, 2)}\n`);
+}
+
+async function listProfiles(home, currentText) {
+  const entries = await readProfileIndex(home);
+  const profiles = [];
+  for (const entry of entries) {
+    const file = path.join(profileDir(home), `${entry.id}.toml`);
+    const snapshot = await readTextIfPresent(file, null);
+    profiles.push({
+      id: entry.id,
+      label: entry.label ?? entry.id,
+      note: entry.note ?? "",
+      kind: entry.kind ?? "custom",
+      createdAt: entry.createdAt ?? null,
+      missing: snapshot === null,
+      active: snapshot !== null && snapshot === currentText
+    });
+  }
+  return profiles.sort((left, right) => String(right.createdAt).localeCompare(String(left.createdAt)));
+}
+
+async function getConfigOverview(home) {
+  const text = await readTextIfPresent(configPath(home), "") ?? "";
+  const summary = summarizeConfig(text);
+  return {
+    codexHome: home,
+    configPath: configPath(home),
+    exists: text.length > 0,
+    raw: text,
+    ...summary,
+    kind: providerKind(summary.provider, summary.modelProvider),
+    reservedBlocks: findReservedProviderBlocks(text),
+    auth: await readAuthSummary(home),
+    presets: buildPresets(summary),
+    profiles: await listProfiles(home, text)
+  };
+}
+
+async function saveProfile(home, { label, note = "", kind }) {
+  if (!label) throw new Error("Profile label is required");
+  const text = await readTextIfPresent(configPath(home), null);
+  if (text === null) throw new Error("No config.toml found to capture");
+  const id = `${timestamp()}-${Math.random().toString(36).slice(2, 6)}`;
+  await fs.mkdir(profileDir(home), { recursive: true });
+  await fs.writeFile(path.join(profileDir(home), `${id}.toml`), text);
+  const summary = summarizeConfig(text);
+  const profiles = await readProfileIndex(home);
+  const entry = {
+    id,
+    label,
+    note,
+    kind: kind ?? providerKind(summary.provider, summary.modelProvider),
+    createdAt: new Date().toISOString()
+  };
+  profiles.push(entry);
+  await writeProfileIndex(home, profiles);
+  return { saved: true, profile: entry };
+}
+
+async function deleteProfile(home, id, { execute }) {
+  const profiles = await readProfileIndex(home);
+  const entry = profiles.find((profile) => profile.id === id);
+  if (!entry) throw new Error(`Profile not found: ${id}`);
+  if (!execute) return { dryRun: true, profile: entry };
+  await writeProfileIndex(home, profiles.filter((profile) => profile.id !== id));
+  await fs.rm(path.join(profileDir(home), `${id}.toml`), { force: true });
+  return { dryRun: false, deleted: true, profile: entry };
+}
+
+async function applyConfig(home, { fields, profileId }, { execute }) {
+  const text = await readTextIfPresent(configPath(home), "") ?? "";
+
+  if (profileId) {
+    const entry = (await readProfileIndex(home)).find((profile) => profile.id === profileId);
+    if (!entry) throw new Error(`Profile not found: ${profileId}`);
+    const snapshot = await readTextIfPresent(path.join(profileDir(home), `${profileId}.toml`), null);
+    if (snapshot === null) throw new Error(`Profile snapshot missing: ${profileId}`);
+    if (!execute) {
+      return { dryRun: true, mode: "profile", profile: entry, changes: [{ scope: "file", key: "config.toml", before: "(current config)", after: `profile "${entry.label}"` }] };
+    }
+    const backupDir = await createBackup(home, `config-profile:${profileId}`, []);
+    await fs.writeFile(configPath(home), snapshot);
+    return { dryRun: false, mode: "profile", profile: entry, backupDir };
+  }
+
+  const { text: nextText, changes } = applyConfigFields(text, fields ?? {});
+  const masked = maskChanges(changes);
+  if (!execute) {
+    return { dryRun: true, mode: "fields", changes: masked };
+  }
+  if (!changes.length) {
+    return { dryRun: false, mode: "fields", changes: [], noOp: true };
+  }
+  const backupDir = await createBackup(home, "config-fields", []);
+  await fs.writeFile(configPath(home), nextText);
+  return { dryRun: false, mode: "fields", changes: masked, backupDir };
+}
+
+function renameProviderInText(text, fromId, toId) {
+  const lines = text.split("\n");
+  const changes = [];
+  for (let i = 0; i < lines.length; i += 1) {
+    const header = tableHeaderName(lines[i]);
+    if (header && providerKeyFromHeader(header) === fromId) {
+      lines[i] = lines[i].replace(/\[model_providers\..*\]/, `[model_providers.${toId}]`);
+      changes.push({ scope: "block", key: "header", before: fromId, after: toId });
+      // Rename the block's name field if it echoed the old id.
+      let end = lines.length;
+      for (let j = i + 1; j < lines.length; j += 1) {
+        if (isTableHeader(lines[j])) { end = j; break; }
+      }
+      if (readScalarInRange(lines, i + 1, end, "name") === fromId) {
+        setScalarInRange(lines, i + 1, end, "name", toId, i + 1);
+      }
+    }
+  }
+  const [ts, te] = topLevelRange(lines);
+  if (readScalarInRange(lines, ts, te, "model_provider") === fromId) {
+    setScalarInRange(lines, ts, te, "model_provider", toId, te);
+    changes.push({ scope: "top", key: "model_provider", before: fromId, after: toId });
+  }
+  return { text: lines.join("\n"), changes };
+}
+
+async function fixReservedProviders(home, { toId = DEFAULT_RELAY_PROVIDER_ID, execute }) {
+  const text = await readTextIfPresent(configPath(home), "") ?? "";
+  let next = text;
+  const allChanges = [];
+  for (const id of BUILTIN_PROVIDER_IDS) {
+    const re = new RegExp(`^\\s*\\[model_providers\\.(?:"${escapeRegex(id)}"|${escapeRegex(id)})\\]`, "m");
+    if (re.test(next)) {
+      const result = renameProviderInText(next, id, toId);
+      next = result.text;
+      allChanges.push(...result.changes);
+    }
+  }
+  if (!allChanges.length) {
+    return { dryRun: !execute, noOp: true, changes: [] };
+  }
+  if (!execute) {
+    return { dryRun: true, toId, changes: allChanges };
+  }
+  const backupDir = await createBackup(home, `config-fix-reserved:${toId}`, []);
+  await fs.writeFile(configPath(home), next);
+  return { dryRun: false, toId, changes: allChanges, backupDir };
+}
+
+async function syncProviderTag(home, { toId, execute }) {
+  const text = await readTextIfPresent(configPath(home), "") ?? "";
+  const target = (toId && String(toId).trim()) || summarizeConfig(text).modelProvider;
+  if (!target) {
+    throw new Error("No target provider id; set model_provider in config.toml or pass --to <id>");
+  }
+  const reader = openDb(home, { readOnly: true });
+  let groups;
+  let total;
+  try {
+    groups = reader.prepare(
+      "SELECT model_provider AS provider, COUNT(*) AS count FROM threads WHERE model_provider <> ? GROUP BY model_provider ORDER BY count DESC"
+    ).all(target);
+    total = groups.reduce((sum, group) => sum + Number(group.count), 0);
+  } finally {
+    reader.close();
+  }
+
+  if (!execute) {
+    return { dryRun: true, target, groups, total };
+  }
+  if (!total) {
+    return { dryRun: false, target, updated: 0, noOp: true };
+  }
+
+  const backupDir = await createBackup(home, `config-sync:${target}`, []);
+  const db = openDb(home);
+  let updated = 0;
+  try {
+    db.exec("PRAGMA busy_timeout = 5000");
+    db.exec("BEGIN IMMEDIATE");
+    const info = db.prepare("UPDATE threads SET model_provider = ? WHERE model_provider <> ?").run(target, target);
+    db.exec("COMMIT");
+    updated = Number(info.changes ?? total);
+  } catch (error) {
+    try {
+      db.exec("ROLLBACK");
+    } catch {
+      // Surface the original failure.
+    }
+    throw error;
+  } finally {
+    db.close();
+  }
+  return { dryRun: false, target, updated, groups, backupDir };
+}
+
+function printConfigSyncResult(result, execute) {
+  printTitle(execute ? "Synced Chat Providers" : "Sync Preview");
+  if (execute) {
+    if (result.noOp) {
+      console.log(`Nothing to sync; all chats already use "${result.target}".`);
+      return;
+    }
+    printKeyValues([
+      ["Target provider", result.target],
+      ["Chats retagged", color(COLOR.green, result.updated)],
+      ["Backup", result.backupDir ? compactPath(result.backupDir) : "none"]
+    ]);
+    if (result.backupDir) printNext(`codex-chat-manager restore ${shellQuote(result.backupDir)} --yes`);
+    return;
+  }
+  printKeyValues([
+    ["Mode", color(COLOR.yellow, "preview")],
+    ["Target provider", result.target],
+    ["Chats to retag", result.total]
+  ]);
+  if (result.groups?.length) {
+    console.log("");
+    printTable([
+      { key: "provider", label: "From provider", width: 24 },
+      { key: "count", label: "Chats", align: "right" }
+    ], result.groups);
+  }
+  printNext("codex-chat-manager config-sync --yes");
+}
+
+function printConfigOverview(overview) {
+  printTitle("Codex Config");
+  printKeyValues([
+    ["Codex home", compactPath(overview.codexHome)],
+    ["Mode", overview.kind === "official"
+      ? color(COLOR.green, "official")
+      : overview.kind === "third-party"
+        ? color(COLOR.yellow, "third-party")
+        : color(COLOR.gray, overview.kind)],
+    ["Model", overview.model ?? "-"],
+    ["Provider", overview.modelProvider ?? "-"],
+    ["Base URL", overview.provider?.baseUrl ?? "-"],
+    ["Wire API", overview.provider?.wireApi ?? "-"],
+    ["Requires OpenAI auth", String(overview.provider?.requiresOpenaiAuth ?? "-")],
+    ["Bearer token", overview.bearer.present ? overview.bearer.masked : "none"],
+    ["Auth mode", overview.auth.mode ?? "-"]
+  ]);
+  console.log("");
+  printTitle("Presets");
+  printTable([
+    { key: "id", label: "Id", width: 12 },
+    { key: "label", label: "Preset", width: 22 },
+    { key: "baseUrl", label: "Base URL", width: 30 },
+    { key: "auth", label: "OpenAI auth", width: 11 }
+  ], overview.presets.map((preset) => ({
+    id: preset.id,
+    label: preset.label,
+    baseUrl: preset.fields.baseUrl,
+    auth: String(preset.fields.requiresOpenaiAuth)
+  })));
+  if (overview.profiles.length) {
+    console.log("");
+    printTitle("Saved profiles");
+    printTable([
+      { key: "id", label: "Id", width: 22 },
+      { key: "label", label: "Label", width: 24 },
+      { key: "kind", label: "Kind", width: 12 },
+      { key: "active", label: "Active", width: 7 }
+    ], overview.profiles.map((profile) => ({
+      id: profile.id,
+      label: profile.label,
+      kind: profile.kind,
+      active: profile.active ? "yes" : ""
+    })));
+  }
+  printNext("codex-chat-manager config-apply --preset thirdparty");
+}
+
+function printConfigApplyResult(result, execute) {
+  printTitle(execute ? "Config Updated" : "Config Change Preview");
+  if (execute) {
+    if (result.noOp) {
+      console.log("No changes; config already matches.");
+      return;
+    }
+    printKeyValues([
+      ["Changed", color(COLOR.green, "yes")],
+      ["Mode", result.mode],
+      ["Backup", result.backupDir ? compactPath(result.backupDir) : "none"]
+    ]);
+    if (result.backupDir) printNext(`codex-chat-manager restore ${shellQuote(result.backupDir)} --yes`);
+    return;
+  }
+  printKeyValues([["Mode", color(COLOR.yellow, "preview")], ["Type", result.mode]]);
+  if (result.changes?.length) {
+    console.log("");
+    printTable([
+      { key: "scope", label: "Scope", width: 9 },
+      { key: "key", label: "Key", width: 26 },
+      { key: "before", label: "Before", width: 24 },
+      { key: "after", label: "After", width: 24 }
+    ], result.changes.map((change) => ({
+      scope: change.scope,
+      key: change.key,
+      before: change.before === null ? "(unset)" : String(change.before),
+      after: change.after === null ? "(removed)" : String(change.after)
+    })));
+  } else {
+    console.log(color(COLOR.gray, "No changes."));
+  }
+}
+
+function configFieldsFromFlags(flags) {
+  const fields = {};
+  if (flags["base-url"] !== undefined) fields.baseUrl = String(flags["base-url"]);
+  if (flags["wire-api"] !== undefined) fields.wireApi = String(flags["wire-api"]);
+  if (flags["requires-auth"] !== undefined) fields.requiresOpenaiAuth = isTruthy(flags["requires-auth"]);
+  if (flags.model !== undefined) fields.model = String(flags.model);
+  if (flags["model-provider"] !== undefined) fields.modelProvider = String(flags["model-provider"]);
+  if (flags["env-key"] !== undefined) fields.envKey = flags["env-key"] === "remove" ? null : String(flags["env-key"]);
+  if (flags.bearer !== undefined) fields.bearer = flags.bearer === true ? "keep" : String(flags.bearer);
+  return fields;
+}
+
 function printJson(value) {
   console.log(JSON.stringify(value, null, 2));
 }
@@ -1165,6 +1845,91 @@ async function main() {
     if (!backupDir) throw new Error("restore requires a backup directory");
     const result = await restoreBackup(home, backupDir, execute);
     asJson ? printJson(result) : printRestoreResult(result, execute);
+    return;
+  }
+
+  if (command === "config-show") {
+    const overview = await getConfigOverview(home);
+    asJson ? printJson(overview) : printConfigOverview(overview);
+    return;
+  }
+
+  if (command === "config-apply") {
+    let fields = configFieldsFromFlags(flags);
+    if (flags.preset) {
+      const overview = await getConfigOverview(home);
+      const preset = overview.presets.find((item) => item.id === flags.preset);
+      if (!preset) throw new Error(`Unknown preset: ${flags.preset}`);
+      fields = { ...preset.fields, ...fields };
+    }
+    const profileId = typeof flags.profile === "string" ? flags.profile : undefined;
+    if (!profileId && Object.keys(fields).length === 0) {
+      throw new Error("config-apply needs --preset, --profile, or field flags");
+    }
+    const result = await applyConfig(home, { fields, profileId }, { execute });
+    asJson ? printJson(result) : printConfigApplyResult(result, execute);
+    return;
+  }
+
+  if (command === "config-file") {
+    const data = await readConfigFile(home, typeof flags.file === "string" ? flags.file : "config");
+    printJson(data);
+    return;
+  }
+
+  if (command === "config-file-write") {
+    const file = typeof flags.file === "string" ? flags.file : "config";
+    const b64 = flags["content-b64"];
+    if (typeof b64 !== "string") throw new Error("config-file-write requires --content-b64");
+    const content = Buffer.from(b64, "base64").toString("utf8");
+    const result = await writeConfigFile(home, file, content, { execute });
+    asJson ? printJson(result) : printKeyValues([
+      [result.dryRun ? "Would write" : "Wrote", result.path],
+      ["Backup", result.backupDir ? compactPath(result.backupDir) : "n/a"]
+    ]);
+    return;
+  }
+
+  if (command === "config-fix") {
+    const result = await fixReservedProviders(home, {
+      toId: typeof flags.to === "string" ? flags.to : DEFAULT_RELAY_PROVIDER_ID,
+      execute
+    });
+    asJson ? printJson(result) : (result.noOp
+      ? console.log("No reserved built-in provider blocks found; nothing to fix.")
+      : printConfigApplyResult({ mode: "fields", changes: result.changes, backupDir: result.backupDir, noOp: false }, execute));
+    return;
+  }
+
+  if (command === "config-sync") {
+    const result = await syncProviderTag(home, {
+      toId: typeof flags.to === "string" ? flags.to : undefined,
+      execute
+    });
+    asJson ? printJson(result) : printConfigSyncResult(result, execute);
+    return;
+  }
+
+  if (command === "config-save-profile") {
+    const label = positionals[1] ?? flags.label;
+    if (!label) throw new Error("config-save-profile requires a label");
+    const result = await saveProfile(home, {
+      label,
+      note: typeof flags.note === "string" ? flags.note : "",
+      kind: typeof flags.kind === "string" ? flags.kind : undefined
+    });
+    asJson ? printJson(result) : printKeyValues([["Saved profile", result.profile.label], ["Id", result.profile.id]]);
+    return;
+  }
+
+  if (command === "config-delete-profile") {
+    const id = positionals[1] ?? flags.id;
+    if (!id) throw new Error("config-delete-profile requires a profile id");
+    const result = await deleteProfile(home, id, { execute });
+    asJson ? printJson(result) : printKeyValues([
+      [result.dryRun ? "Would delete" : "Deleted", result.profile.label],
+      ["Id", result.profile.id]
+    ]);
     return;
   }
 

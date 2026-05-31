@@ -179,6 +179,161 @@ test("mutation refuses rollout paths outside selected codex home", async () => {
   assert.equal(await exists(fixture.rolloutPath), true);
 });
 
+const SAMPLE_CONFIG = `model_provider = "openai-custom"
+model = "gpt-5.5"
+experimental_bearer_token = "sk-secrettoken1234567890"
+
+[model_providers.openai-custom]
+name = "openai-custom"
+base_url = "https://api.axis.fan"
+wire_api = "responses"
+requires_openai_auth = false
+
+[mcp_servers.node_repl]
+command = "/x/node_repl"
+
+[projects."/Users/me/proj"]
+trust_level = "trusted"
+`;
+
+async function makeConfigHome(config = SAMPLE_CONFIG) {
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), "ccm-config-"));
+  await fs.writeFile(path.join(home, "config.toml"), config);
+  await fs.writeFile(path.join(home, "auth.json"), JSON.stringify({ auth_mode: "chatgpt", OPENAI_API_KEY: null }));
+  return home;
+}
+
+test("config-show reports active provider, kind, and presets", async () => {
+  const home = await makeConfigHome();
+  const { stdout } = await runCli(["config-show", "--codex-home", home, "--json"]);
+  const overview = JSON.parse(stdout);
+  assert.equal(overview.kind, "third-party");
+  assert.equal(overview.provider.baseUrl, "https://api.axis.fan");
+  assert.equal(overview.provider.requiresOpenaiAuth, false);
+  assert.equal(overview.bearer.present, true);
+  assert.ok(!overview.bearer.masked.includes("secrettoken"), "bearer token must be masked");
+  assert.equal(overview.auth.mode, "chatgpt");
+  assert.deepEqual(overview.presets.map((p) => p.id), ["official", "thirdparty"]);
+});
+
+test("config-apply official preset points at built-in openai with no custom block", async () => {
+  const home = await makeConfigHome();
+  const preview = JSON.parse((await runCli(["config-apply", "--preset", "official", "--codex-home", home, "--json"])).stdout);
+  assert.equal(preview.dryRun, true);
+  assert.ok(preview.changes.some((c) => c.key === "model_provider" && c.after === "openai"));
+
+  await runCli(["config-apply", "--preset", "official", "--codex-home", home, "--json", "--yes"]);
+  const after = await fs.readFile(path.join(home, "config.toml"), "utf8");
+  assert.match(after, /model_provider = "openai"/);
+  assert.doesNotMatch(after, /\[model_providers\.openai\]/); // must NOT override the reserved built-in
+  assert.match(after, /\[model_providers\.openai-custom\]/); // custom relay block left intact
+  assert.match(after, /\[mcp_servers\.node_repl\]/);
+  assert.match(after, /experimental_bearer_token = "sk-secrettoken1234567890"/);
+});
+
+test("config-apply thirdparty preset creates a custom provider block", async () => {
+  const home = await makeConfigHome('model_provider = "openai"\nmodel = "gpt-5.5"\n');
+  await runCli(["config-apply", "--preset", "thirdparty", "--codex-home", home, "--json", "--yes"]);
+  const after = await fs.readFile(path.join(home, "config.toml"), "utf8");
+  assert.match(after, /model_provider = "openai-custom"/);
+  assert.match(after, /\[model_providers\.openai-custom\]/);
+  assert.match(after, /requires_openai_auth = false/);
+});
+
+test("config-fix renames a reserved [model_providers.openai] block and guards raw writes", async () => {
+  const reserved = 'model_provider = "openai"\nmodel = "gpt-5.5"\n\n[model_providers.openai]\nname = "openai"\nbase_url = "https://api.axis.fan"\nrequires_openai_auth = false\n';
+  const home = await makeConfigHome(reserved);
+
+  const result = JSON.parse((await runCli(["config-fix", "--codex-home", home, "--json", "--yes"])).stdout);
+  assert.ok(result.backupDir);
+  const after = await fs.readFile(path.join(home, "config.toml"), "utf8");
+  assert.match(after, /\[model_providers\.openai-custom\]/);
+  assert.doesNotMatch(after, /\[model_providers\.openai\]/);
+  assert.match(after, /model_provider = "openai-custom"/);
+
+  // Raw write guard refuses to re-introduce a reserved block.
+  const badB64 = Buffer.from("[model_providers.openai]\n", "utf8").toString("base64");
+  await assert.rejects(
+    runCli(["config-file-write", "--codex-home", home, "--file", "config", "--content-b64", badB64, "--yes"]),
+    /reserved built-in/
+  );
+});
+
+test("config save, apply, and delete profile round-trips", async () => {
+  const home = await makeConfigHome();
+  const saved = JSON.parse((await runCli(["config-save-profile", "relay", "--codex-home", home, "--json"])).stdout);
+  assert.equal(saved.saved, true);
+  const profileId = saved.profile.id;
+
+  // Switch live config to official, then restore the saved relay profile.
+  await runCli(["config-apply", "--preset", "official", "--codex-home", home, "--json", "--yes"]);
+  await runCli(["config-apply", "--profile", profileId, "--codex-home", home, "--json", "--yes"]);
+  const restored = await fs.readFile(path.join(home, "config.toml"), "utf8");
+  assert.match(restored, /base_url = "https:\/\/api\.axis\.fan"/);
+
+  const overview = JSON.parse((await runCli(["config-show", "--codex-home", home, "--json"])).stdout);
+  assert.equal(overview.profiles.find((p) => p.id === profileId)?.active, true);
+
+  await runCli(["config-delete-profile", profileId, "--codex-home", home, "--json", "--yes"]);
+  const afterDelete = JSON.parse((await runCli(["config-show", "--codex-home", home, "--json"])).stdout);
+  assert.equal(afterDelete.profiles.length, 0);
+});
+
+test("config-sync retags mismatched chats to the active provider", async () => {
+  const fixture = await makeFixture(); // one thread tagged "openai"
+  // Add a second thread under a different provider id.
+  const db = new DatabaseSync(path.join(fixture.home, "state_5.sqlite"));
+  db.prepare(`
+    INSERT INTO threads (
+      id, rollout_path, created_at, updated_at, source, model_provider, cwd, title,
+      sandbox_policy, approval_mode, has_user_event, first_user_message, preview, thread_source
+    ) VALUES ('019e0000-0000-7000-8000-000000000002', ?, 1780000002, 1780000003, 'vscode', 'OpenAI', ?, 'Second', '{}', 'never', 1, 'hi', 'hi', 'user')
+  `).run(path.join(fixture.home, "sessions", "x.jsonl"), fixture.project);
+  db.close();
+
+  // Active provider id in config is "openai" (set by makeFixture's config.toml? no — set it).
+  await fs.writeFile(path.join(fixture.home, "config.toml"), 'model_provider = "openai"\nmodel = "gpt-5.5"\n');
+
+  const preview = JSON.parse((await runCli(["config-sync", "--codex-home", fixture.home, "--json"])).stdout);
+  assert.equal(preview.dryRun, true);
+  assert.equal(preview.target, "openai");
+  assert.equal(preview.total, 1); // the "OpenAI" thread
+
+  await runCli(["config-sync", "--codex-home", fixture.home, "--json", "--yes"]);
+  const after = new DatabaseSync(path.join(fixture.home, "state_5.sqlite"), { readOnly: true });
+  const distinct = after.prepare("SELECT DISTINCT model_provider AS p FROM threads").all().map((r) => r.p);
+  after.close();
+  assert.deepEqual(distinct, ["openai"]);
+});
+
+test("config-show exposes the full bearer token and api key for editing", async () => {
+  const home = await makeConfigHome();
+  const overview = JSON.parse((await runCli(["config-show", "--codex-home", home, "--json"])).stdout);
+  assert.equal(overview.bearer.value, "sk-secrettoken1234567890");
+  assert.equal(overview.auth.apiKey, null);
+});
+
+test("config-file reads and config-file-write saves raw files with backup and JSON validation", async () => {
+  const home = await makeConfigHome();
+
+  const read = JSON.parse((await runCli(["config-file", "--codex-home", home, "--file", "config", "--json"])).stdout);
+  assert.match(read.raw, /api\.axis\.fan/);
+
+  // Write config.toml raw.
+  const newConfig = 'model_provider = "openai"\nmodel = "gpt-5.5"\n';
+  const b64 = Buffer.from(newConfig, "utf8").toString("base64");
+  const write = JSON.parse((await runCli(["config-file-write", "--codex-home", home, "--file", "config", "--content-b64", b64, "--yes", "--json"])).stdout);
+  assert.ok(write.backupDir);
+  assert.equal(await fs.readFile(path.join(home, "config.toml"), "utf8"), newConfig);
+
+  // auth.json must be valid JSON.
+  const badB64 = Buffer.from("{ not json", "utf8").toString("base64");
+  await assert.rejects(
+    runCli(["config-file-write", "--codex-home", home, "--file", "auth", "--content-b64", badB64, "--yes"]),
+    /not valid JSON/
+  );
+});
+
 async function exists(filePath) {
   try {
     await fs.access(filePath);

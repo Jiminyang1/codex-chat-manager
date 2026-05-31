@@ -3,104 +3,134 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Codex Chat Manager</title>
+    <title>Codex Manager</title>
     <link rel="stylesheet" href="/styles.css">
   </head>
   <body>
-    <div class="app-shell">
-      <header class="topbar">
-        <div>
-          <h1>Codex Chat Manager</h1>
-          <p id="codexHomeLabel">Loading local state...</p>
-        </div>
-        <div class="topbar-actions">
-          <label class="home-field">
-            <span>Codex home</span>
-            <input id="codexHomeInput" type="text" autocomplete="off">
-          </label>
-          <button id="refreshButton" class="button primary" type="button">Refresh</button>
+    <div class="app">
+      <header class="appbar">
+        <div class="brand"><span class="logo">◆</span> Codex Manager</div>
+        <nav class="tabs">
+          <button class="tab active" data-view="chats" type="button">Chats</button>
+          <button class="tab" data-view="config" type="button">Provider</button>
+        </nav>
+        <div class="appbar-actions">
+          <button id="settingsBtn" class="icon-btn" type="button" title="Settings" aria-label="Settings">⚙</button>
+          <button id="refreshButton" class="icon-btn" type="button" title="Refresh" aria-label="Refresh">⟳</button>
         </div>
       </header>
 
-      <main class="workspace">
-        <aside class="sidebar">
-          <section class="panel">
-            <div class="panel-head">
-              <h2>Projects</h2>
-              <span id="projectCount" class="count">0</span>
-            </div>
-            <div id="projectList" class="project-list"></div>
-          </section>
-          <section class="panel">
-            <div class="panel-head">
-              <h2>Providers</h2>
-            </div>
-            <div id="providerList" class="provider-list"></div>
-          </section>
-        </aside>
+      <div id="settingsPop" class="popover hidden">
+        <label class="field">
+          <span>Codex home</span>
+          <input id="codexHomeInput" type="text" autocomplete="off">
+        </label>
+        <p id="codexHomeLabel" class="muted-sm"></p>
+      </div>
 
-        <section class="content">
-          <div class="status-grid" id="statusGrid"></div>
+      <main id="view-chats" class="view">
+        <div class="controls">
+          <input id="searchInput" class="search" type="search" placeholder="Search chats by title, project, or id">
+          <div class="filters">
+            <select id="projectFilter" class="select" aria-label="Filter by project"></select>
+            <select id="providerFilter" class="select" aria-label="Filter by provider"></select>
+            <label class="chk"><input id="archivedOnly" type="checkbox"> Archived</label>
+          </div>
+        </div>
 
-          <section class="table-panel">
-            <div class="toolbar">
-              <div>
-                <h2>Chats</h2>
-                <p id="threadScope">All active and archived chats</p>
-              </div>
-              <div class="toolbar-controls">
-                <input id="searchInput" class="search" type="search" placeholder="Search title, cwd, id">
-                <label class="check">
-                  <input id="archivedOnly" type="checkbox">
-                  <span>Archived</span>
-                </label>
-                <button id="clearFilters" class="button ghost" type="button">Clear</button>
-              </div>
-            </div>
-            <div class="table-wrap">
-              <table>
-                <thead>
-                  <tr>
-                    <th>Chat</th>
-                    <th>Project</th>
-                    <th>Provider</th>
-                    <th>Updated</th>
-                    <th></th>
-                  </tr>
-                </thead>
-                <tbody id="threadRows"></tbody>
-              </table>
-            </div>
-          </section>
+        <div class="listmeta">
+          <span id="metaLine" class="muted-sm"></span>
+          <div class="listmeta-actions">
+            <button id="deleteProjectBtn" class="link danger hidden" type="button">Delete project</button>
+            <button id="backupsBtn" class="link" type="button">Backups</button>
+          </div>
+        </div>
+
+        <div id="backupsPanel" class="backups-panel hidden"></div>
+        <div id="threadList" class="chat-list"></div>
+      </main>
+
+      <main id="view-config" class="view hidden">
+        <div id="reservedBanner" class="banner hidden"></div>
+        <section class="card active-card">
+          <div class="card-head">
+            <h2>Active provider</h2>
+            <span id="configKind" class="badge">unknown</span>
+          </div>
+          <div id="configSummary" class="summary"></div>
+          <div class="sync-row">
+            <p id="syncHint" class="muted-sm"></p>
+            <button id="syncButton" class="btn small" type="button">Sync chats here</button>
+          </div>
         </section>
 
-        <aside class="inspector">
-          <section class="panel selected-panel">
-            <div class="panel-head">
-              <h2>Selection</h2>
-            </div>
-            <div id="selectionEmpty" class="empty">Select a chat or project.</div>
-            <div id="selectionDetails" class="selection-details hidden"></div>
-          </section>
+        <div id="presetCards" class="preset-row"></div>
 
-          <section class="panel danger-panel">
-            <div class="panel-head">
-              <h2>Actions</h2>
+        <details class="card collapsible">
+          <summary>Advanced settings</summary>
+          <form id="configForm" class="form">
+            <label class="field">
+              <span>Base URL</span>
+              <input id="fieldBaseUrl" type="text" autocomplete="off" placeholder="https://api.openai.com/v1">
+            </label>
+            <div class="field-row">
+              <label class="field">
+                <span>Wire API</span>
+                <select id="fieldWireApi" class="select">
+                  <option value="responses">responses</option>
+                  <option value="chat">chat</option>
+                </select>
+              </label>
+              <label class="field">
+                <span>Model</span>
+                <input id="fieldModel" type="text" autocomplete="off" placeholder="gpt-5.5">
+              </label>
             </div>
-            <div class="action-stack">
-              <button id="confirmTrashThread" class="button danger" type="button" disabled>Delete Chat</button>
-              <button id="confirmDeleteProject" class="button danger" type="button" disabled>Delete Project</button>
+            <label class="field toggle-field">
+              <span>Requires OpenAI auth</span>
+              <span class="switch">
+                <input id="fieldRequiresAuth" type="checkbox">
+                <span class="slider"></span>
+              </span>
+            </label>
+            <label class="field">
+              <span>API key / bearer token</span>
+              <div class="key-row">
+                <input id="fieldBearerValue" type="password" autocomplete="off" placeholder="(none)">
+                <button id="bearerReveal" class="icon-btn" type="button" title="Show / hide">👁</button>
+              </div>
+              <span class="muted-sm">Stored as <code>experimental_bearer_token</code>. Leave unchanged to keep; clear it to remove.</span>
+            </label>
+            <div class="form-actions">
+              <button id="applyFormButton" class="btn primary" type="submit">Preview &amp; apply</button>
             </div>
-          </section>
+          </form>
+        </details>
 
-          <section class="panel">
-            <div class="panel-head">
-              <h2>Backups</h2>
-              <button id="reloadBackups" class="mini" type="button">Reload</button>
-            </div>
-            <div id="backupList" class="backup-list"></div>
-          </section>
-        </aside>
+        <details class="card collapsible">
+          <summary>Profiles</summary>
+          <div class="profiles-head">
+            <p class="muted-sm">Named snapshots of <code>config.toml</code>.</p>
+            <button id="saveProfileButton" class="link" type="button">Save current</button>
+          </div>
+          <div id="profileList" class="profile-list"></div>
+        </details>
+
+        <details class="card collapsible" id="rawDetails">
+          <summary>Raw files — config.toml &amp; auth.json</summary>
+          <div class="raw-tabs">
+            <button class="raw-tab active" data-file="config" type="button">config.toml</button>
+            <button class="raw-tab" data-file="auth" type="button">auth.json</button>
+          </div>
+          <textarea id="rawEditor" class="raw-area" spellcheck="false" autocomplete="off"></textarea>
+          <div class="raw-foot">
+            <span id="rawPath" class="muted-sm"></span>
+            <span class="raw-foot-actions">
+              <button id="rawReload" class="link" type="button">Reload</button>
+              <button id="rawSave" class="btn small primary" type="button">Save</button>
+            </span>
+          </div>
+        </details>
       </main>
     </div>
 
@@ -108,12 +138,12 @@
       <div class="modal-card">
         <div class="modal-head">
           <h2 id="modalTitle">Confirm</h2>
-          <button id="modalClose" class="icon-button" type="button" aria-label="Close">x</button>
+          <button id="modalClose" class="icon-btn" type="button" aria-label="Close">×</button>
         </div>
         <pre id="modalBody"></pre>
         <div class="modal-actions">
-          <button id="modalCancel" class="button ghost" type="button">Cancel</button>
-          <button id="modalExecute" class="button danger" type="button">Execute</button>
+          <button id="modalCancel" class="btn ghost" type="button">Cancel</button>
+          <button id="modalExecute" class="btn danger" type="button">Execute</button>
         </div>
       </div>
     </div>

@@ -185,6 +185,90 @@ async function handleApi(req, res) {
     return;
   }
 
+  if (req.method === "GET" && url.pathname === "/api/config") {
+    sendJson(res, 200, await runCli([...argsWithHome("config-show", codexHome), "--json"]));
+    return;
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/config/apply") {
+    const body = await readBody(req);
+    const args = [...argsWithHome("config-apply", safeCodexHome(body.codexHome)), "--json"];
+    if (typeof body.preset === "string") args.push("--preset", body.preset);
+    if (typeof body.profile === "string") args.push("--profile", body.profile);
+    const fields = body.fields ?? {};
+    const fieldFlags = {
+      baseUrl: "--base-url",
+      wireApi: "--wire-api",
+      model: "--model",
+      modelProvider: "--model-provider",
+      envKey: "--env-key",
+      bearer: "--bearer"
+    };
+    for (const [name, flag] of Object.entries(fieldFlags)) {
+      if (fields[name] !== undefined && fields[name] !== null) args.push(flag, String(fields[name]));
+    }
+    if (fields.requiresOpenaiAuth !== undefined) {
+      args.push("--requires-auth", fields.requiresOpenaiAuth ? "true" : "false");
+    }
+    if (body.confirmed === true) args.push("--yes");
+    sendJson(res, 200, await runCli(args));
+    return;
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/config/file") {
+    const file = url.searchParams.get("file") === "auth" ? "auth" : "config";
+    sendJson(res, 200, await runCli([...argsWithHome("config-file", codexHome), "--file", file, "--json"]));
+    return;
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/config/file") {
+    const body = await readBody(req);
+    const file = body.file === "auth" ? "auth" : "config";
+    if (typeof body.content !== "string") throw new Error("content is required");
+    const b64 = Buffer.from(body.content, "utf8").toString("base64");
+    const args = [...argsWithHome("config-file-write", safeCodexHome(body.codexHome)), "--file", file, "--content-b64", b64, "--json"];
+    if (body.confirmed === true) args.push("--yes");
+    sendJson(res, 200, await runCli(args));
+    return;
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/config/fix") {
+    const body = await readBody(req);
+    const args = [...argsWithHome("config-fix", safeCodexHome(body.codexHome)), "--json"];
+    if (typeof body.to === "string" && body.to) args.push("--to", body.to);
+    if (body.confirmed === true) args.push("--yes");
+    sendJson(res, 200, await runCli(args));
+    return;
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/config/sync") {
+    const body = await readBody(req);
+    const args = [...argsWithHome("config-sync", safeCodexHome(body.codexHome)), "--json"];
+    if (typeof body.to === "string" && body.to) args.push("--to", body.to);
+    if (body.confirmed === true) args.push("--yes");
+    sendJson(res, 200, await runCli(args));
+    return;
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/config/save-profile") {
+    const body = await readBody(req);
+    if (!body.label) throw new Error("label is required");
+    const args = [...argsWithHome("config-save-profile", safeCodexHome(body.codexHome)), body.label, "--json"];
+    if (body.note) args.push("--note", String(body.note));
+    if (body.kind) args.push("--kind", String(body.kind));
+    sendJson(res, 200, await runCli(args));
+    return;
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/config/delete-profile") {
+    const body = await readBody(req);
+    if (!body.id) throw new Error("id is required");
+    const args = [...argsWithHome("config-delete-profile", safeCodexHome(body.codexHome)), body.id, "--json"];
+    if (body.confirmed === true) args.push("--yes");
+    sendJson(res, 200, await runCli(args));
+    return;
+  }
+
   if (req.method === "POST" && url.pathname === "/api/restore") {
     const body = await readBody(req);
     if (!body.backupDir) throw new Error("backupDir is required");

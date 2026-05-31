@@ -1,4 +1,5 @@
 const state = {
+  view: "chats",
   codexHome: "",
   status: null,
   projects: [],
@@ -6,31 +7,49 @@ const state = {
   backups: [],
   selectedProject: "",
   selectedProvider: "",
-  selectedThreadId: "",
-  selectedBackup: null
+  config: null,
+  rawFile: "config"
 };
 
 const $ = (id) => document.getElementById(id);
 
 const els = {
-  codexHomeLabel: $("codexHomeLabel"),
   codexHomeInput: $("codexHomeInput"),
+  codexHomeLabel: $("codexHomeLabel"),
+  settingsBtn: $("settingsBtn"),
+  settingsPop: $("settingsPop"),
   refreshButton: $("refreshButton"),
-  projectCount: $("projectCount"),
-  projectList: $("projectList"),
-  providerList: $("providerList"),
-  statusGrid: $("statusGrid"),
-  threadScope: $("threadScope"),
   searchInput: $("searchInput"),
+  projectFilter: $("projectFilter"),
+  providerFilter: $("providerFilter"),
   archivedOnly: $("archivedOnly"),
-  clearFilters: $("clearFilters"),
-  threadRows: $("threadRows"),
-  selectionEmpty: $("selectionEmpty"),
-  selectionDetails: $("selectionDetails"),
-  confirmTrashThread: $("confirmTrashThread"),
-  confirmDeleteProject: $("confirmDeleteProject"),
-  backupList: $("backupList"),
-  reloadBackups: $("reloadBackups"),
+  metaLine: $("metaLine"),
+  deleteProjectBtn: $("deleteProjectBtn"),
+  backupsBtn: $("backupsBtn"),
+  backupsPanel: $("backupsPanel"),
+  threadList: $("threadList"),
+  // config
+  configKind: $("configKind"),
+  configSummary: $("configSummary"),
+  reservedBanner: $("reservedBanner"),
+  syncHint: $("syncHint"),
+  syncButton: $("syncButton"),
+  presetCards: $("presetCards"),
+  configForm: $("configForm"),
+  fieldBaseUrl: $("fieldBaseUrl"),
+  fieldWireApi: $("fieldWireApi"),
+  fieldModel: $("fieldModel"),
+  fieldRequiresAuth: $("fieldRequiresAuth"),
+  fieldBearerValue: $("fieldBearerValue"),
+  bearerReveal: $("bearerReveal"),
+  saveProfileButton: $("saveProfileButton"),
+  profileList: $("profileList"),
+  rawDetails: $("rawDetails"),
+  rawEditor: $("rawEditor"),
+  rawPath: $("rawPath"),
+  rawReload: $("rawReload"),
+  rawSave: $("rawSave"),
+  // shared
   modal: $("modal"),
   modalTitle: $("modalTitle"),
   modalBody: $("modalBody"),
@@ -40,14 +59,16 @@ const els = {
   toast: $("toast")
 };
 
+const tabs = Array.from(document.querySelectorAll(".tab"));
+
+// --- helpers ---------------------------------------------------------------
+
 function apiUrl(path, params = {}) {
   const url = new URL(path, window.location.origin);
   const codexHome = state.codexHome || els.codexHomeInput.value;
   if (codexHome) url.searchParams.set("codexHome", codexHome);
   for (const [key, value] of Object.entries(params)) {
-    if (value !== undefined && value !== null && value !== "") {
-      url.searchParams.set(key, value);
-    }
+    if (value !== undefined && value !== null && value !== "") url.searchParams.set(key, value);
   }
   return url;
 }
@@ -77,19 +98,32 @@ function showToast(message) {
   showToast.timer = window.setTimeout(() => els.toast.classList.add("hidden"), 3600);
 }
 
+function escapeHtml(value) {
+  return String(value)
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#039;");
+}
+
+const escapeAttr = escapeHtml;
+
 function formatDate(seconds) {
   if (!seconds) return "-";
-  return new Intl.DateTimeFormat(undefined, {
-    month: "short",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit"
-  }).format(new Date(seconds * 1000));
+  return new Intl.DateTimeFormat(undefined, { month: "short", day: "2-digit", hour: "2-digit", minute: "2-digit" })
+    .format(new Date(seconds * 1000));
 }
 
 function shortPath(value) {
   if (!value) return "";
   return value.replace(/^\/Users\/[^/]+/, "~");
+}
+
+function projectName(value) {
+  if (!value) return "(no project)";
+  const parts = String(value).split("/").filter(Boolean);
+  return parts[parts.length - 1] || shortPath(value);
 }
 
 function providerCounts() {
@@ -110,144 +144,255 @@ function currentThreads() {
   });
 }
 
-function renderStatus() {
+// --- modal -----------------------------------------------------------------
+
+function openModal({ title, body, executeLabel = "Execute", onExecute }) {
+  els.modalTitle.textContent = title;
+  els.modalBody.textContent = typeof body === "string" ? body : JSON.stringify(body, null, 2);
+  els.modalExecute.textContent = executeLabel;
+  els.modalExecute.onclick = async () => {
+    try {
+      await onExecute?.();
+      closeModal();
+      showToast("Done");
+      await loadAll();
+      if (state.view === "config") await loadConfig();
+    } catch (error) {
+      showToast(error.message);
+    }
+  };
+  els.modal.classList.remove("hidden");
+}
+
+function closeModal() {
+  els.modal.classList.add("hidden");
+}
+
+// --- chats view ------------------------------------------------------------
+
+function renderFilters() {
+  const projectOptions = [`<option value="">All projects (${state.projects.length})</option>`]
+    .concat(state.projects.map((project) =>
+      `<option value="${escapeAttr(project.path)}" ${project.path === state.selectedProject ? "selected" : ""}>${escapeHtml(projectName(project.path))} · ${project.total}</option>`));
+  els.projectFilter.innerHTML = projectOptions.join("");
+
+  const providerOptions = [`<option value="">All providers</option>`]
+    .concat(providerCounts().map(([provider, count]) =>
+      `<option value="${escapeAttr(provider)}" ${provider === state.selectedProvider ? "selected" : ""}>${escapeHtml(provider)} · ${count}</option>`));
+  els.providerFilter.innerHTML = providerOptions.join("");
+
+  els.deleteProjectBtn.classList.toggle("hidden", !state.selectedProject);
+}
+
+function renderMeta() {
   const status = state.status;
-  if (!status) return;
-  const stats = [
-    ["SQLite", status.integrity, status.integrity === "ok" ? "ok" : "warn"],
-    ["Threads", status.totals?.threads ?? 0, ""],
-    ["Rollouts", status.rolloutFiles ?? 0, ""],
-    ["Mismatches", (status.missingRolloutCount ?? 0) + (status.missingDbCount ?? 0) + (status.rolloutPathOutsideHomeCount ?? 0), "warn"]
-  ];
-  els.statusGrid.innerHTML = stats.map(([label, value, tone]) => `
-    <div class="stat ${tone}">
-      <span>${escapeHtml(label)}</span>
-      <strong>${escapeHtml(String(value))}</strong>
-    </div>
-  `).join("");
-  els.codexHomeLabel.textContent = status.codexHome;
-  if (!state.codexHome) {
-    state.codexHome = status.codexHome;
-    els.codexHomeInput.value = status.codexHome;
+  const mismatch = (status?.missingRolloutCount ?? 0) + (status?.missingDbCount ?? 0) + (status?.rolloutPathOutsideHomeCount ?? 0);
+  const parts = [`${currentThreads().length} shown`];
+  if (status) {
+    parts.push(`${status.totals?.threads ?? 0} total`);
+    parts.push(`db ${status.integrity}`);
+    if (mismatch) parts.push(`${mismatch} mismatches`);
   }
+  els.metaLine.textContent = parts.join(" · ");
+  els.codexHomeLabel.textContent = status?.codexHome ?? "";
 }
 
-function renderProjects() {
-  els.projectCount.textContent = String(state.projects.length);
-  els.projectList.innerHTML = state.projects.map((project) => {
-    const active = project.path === state.selectedProject ? "active" : "";
-    return `
-      <button class="project-item ${active}" data-project="${escapeAttr(project.path)}" type="button">
-        <div class="item-title">${escapeHtml(shortPath(project.path))}</div>
-        <div class="item-meta">
-          <span>${project.saved ? "saved" : "discovered"}</span>
-          <span>${project.total} chats</span>
-          <span>${project.archived} archived</span>
-        </div>
-      </button>
-    `;
-  }).join("");
-}
-
-function renderProviders() {
-  const items = providerCounts();
-  els.providerList.innerHTML = [
-    `<button class="provider-item ${state.selectedProvider ? "" : "active"}" data-provider="" type="button">
-      <div class="item-title">All providers</div>
-      <div class="item-meta"><span>${state.status?.totals?.threads ?? 0} chats</span></div>
-    </button>`,
-    ...items.map(([provider, count]) => `
-      <button class="provider-item ${provider === state.selectedProvider ? "active" : ""}" data-provider="${escapeAttr(provider)}" type="button">
-        <div class="item-title">${escapeHtml(provider)}</div>
-        <div class="item-meta"><span>${count} chats</span></div>
-      </button>
-    `)
-  ].join("");
-}
-
-function renderThreads() {
+function renderThreadList() {
   const threads = currentThreads();
-  const scope = [
-    state.selectedProject ? shortPath(state.selectedProject) : "All projects",
-    state.selectedProvider || "all providers",
-    els.archivedOnly.checked ? "archived only" : "active + archived"
-  ];
-  els.threadScope.textContent = `${scope.join(" / ")} - ${threads.length} shown`;
-  els.threadRows.innerHTML = threads.map((thread) => {
-    const selected = thread.id === state.selectedThreadId ? "selected" : "";
-    return `
-      <tr class="${selected}" data-thread="${escapeAttr(thread.id)}">
-        <td>
-          <div class="thread-title">${escapeHtml(thread.title || "(untitled)")}</div>
-          <div class="thread-id">${escapeHtml(thread.id)}</div>
-        </td>
-        <td class="path-cell">${escapeHtml(shortPath(thread.cwd))}</td>
-        <td><span class="badge">${escapeHtml(thread.model_provider)}</span></td>
-        <td>${escapeHtml(formatDate(thread.updated_at))}</td>
-        <td>${thread.archived ? "<span class=\"badge\">archived</span>" : ""}</td>
-      </tr>
-    `;
-  }).join("");
-}
-
-function renderSelection() {
-  const thread = state.threads.find((item) => item.id === state.selectedThreadId);
-  const project = state.projects.find((item) => item.path === state.selectedProject);
-  const hasSelection = Boolean(thread || project);
-  els.selectionEmpty.classList.toggle("hidden", hasSelection);
-  els.selectionDetails.classList.toggle("hidden", !hasSelection);
-  els.confirmTrashThread.disabled = !thread;
-  els.confirmDeleteProject.disabled = !project;
-  if (!hasSelection) {
-    els.selectionDetails.innerHTML = "";
+  if (!threads.length) {
+    els.threadList.innerHTML = `<div class="empty">No chats match your filters.</div>`;
     return;
   }
-  const rows = thread
-    ? [
-      ["Chat", thread.title || "(untitled)"],
-      ["Thread ID", thread.id],
-      ["Project", shortPath(thread.cwd)],
-      ["Provider", thread.model_provider],
-      ["Rollout", shortPath(thread.rollout_path)]
-    ]
-    : [
-      ["Project", shortPath(project.path)],
-      ["Saved", project.saved ? "yes" : "no"],
-      ["Chats", `${project.total} total, ${project.archived} archived`],
-      ["Delete", "all exact-cwd chats"],
-      ["Updated", project.updated_at ? formatDate(project.updated_at) : "-"]
-    ];
-  els.selectionDetails.innerHTML = rows.map(([label, value]) => `
-    <div class="detail-row">
-      <span>${escapeHtml(label)}</span>
-      <strong>${escapeHtml(String(value))}</strong>
+  els.threadList.innerHTML = threads.map((thread) => `
+    <div class="chat-row">
+      <div class="chat-main">
+        <div class="chat-title">${escapeHtml(thread.title || "(untitled)")}</div>
+        <div class="chat-sub">
+          <span>${escapeHtml(projectName(thread.cwd))}</span>
+          <span class="dot">·</span>
+          <span class="tag">${escapeHtml(thread.model_provider)}</span>
+          <span class="dot">·</span>
+          <span>${escapeHtml(formatDate(thread.updated_at))}</span>
+          ${thread.archived ? '<span class="dot">·</span><span class="tag muted">archived</span>' : ""}
+        </div>
+      </div>
+      <button class="trash" data-trash="${escapeAttr(thread.id)}" type="button" title="Delete chat" aria-label="Delete chat">🗑</button>
     </div>
   `).join("");
 }
 
 function renderBackups() {
   if (!state.backups.length) {
-    els.backupList.innerHTML = `<div class="empty">No chat-manager backups.</div>`;
+    els.backupsPanel.innerHTML = `<div class="empty">No backups yet.</div>`;
     return;
   }
-  els.backupList.innerHTML = state.backups.map((backup) => `
-    <button class="backup-item" data-backup="${escapeAttr(backup.path)}" type="button">
-      <div class="item-title">${escapeHtml(backup.name)}</div>
-      <div class="item-meta">
-        <span>${escapeHtml(backup.reason || "backup")}</span>
-        <span>${backup.threadIds.length} threads</span>
+  els.backupsPanel.innerHTML = state.backups.map((backup) => `
+    <div class="backup-row">
+      <div>
+        <div class="chat-title">${escapeHtml(backup.reason || "backup")}</div>
+        <div class="chat-sub"><span>${escapeHtml(new Date(backup.createdAt).toLocaleString())}</span><span class="dot">·</span><span>${backup.threadIds.length} chats</span></div>
       </div>
-    </button>
+      <button class="link" data-restore="${escapeAttr(backup.path)}" type="button">Restore</button>
+    </div>
   `).join("");
 }
 
-function renderAll() {
-  renderStatus();
-  renderProjects();
-  renderProviders();
-  renderThreads();
-  renderSelection();
-  renderBackups();
+function renderChats() {
+  renderFilters();
+  renderMeta();
+  renderThreadList();
+}
+
+// --- config view -----------------------------------------------------------
+
+function kindLabel(kind) {
+  if (kind === "official") return "Official OpenAI";
+  if (kind === "third-party") return "Third-party relay";
+  return kind || "unknown";
+}
+
+function renderConfig() {
+  const config = state.config;
+  if (!config) return;
+  els.configKind.textContent = kindLabel(config.kind);
+  els.configKind.className = `badge ${config.kind === "official" ? "ok" : config.kind === "third-party" ? "warn" : ""}`;
+
+  const reserved = config.reservedBlocks ?? [];
+  if (reserved.length) {
+    els.reservedBanner.classList.remove("hidden");
+    els.reservedBanner.innerHTML = `
+      <div>
+        <strong>config.toml is invalid.</strong>
+        <span>It defines <code>[model_providers.${escapeHtml(reserved[0])}]</code>, but <code>${escapeHtml(reserved[0])}</code> is a reserved built-in id Codex won't accept. Rename it to a custom id.</span>
+      </div>
+      <button id="fixReservedBtn" class="btn small danger" type="button">Fix (rename to openai-custom)</button>`;
+  } else {
+    els.reservedBanner.classList.add("hidden");
+    els.reservedBanner.innerHTML = "";
+  }
+
+  const provider = config.provider ?? {};
+  const rows = [
+    ["Model", config.model ?? "-"],
+    ["Provider id", config.modelProvider ?? "-"],
+    ["Base URL", provider.baseUrl ?? "-"],
+    ["Auth", provider.requiresOpenaiAuth ? `OpenAI login (${config.auth?.mode ?? "?"})` : "bearer token"],
+    ["Bearer", config.bearer?.present ? config.bearer.masked : "none"]
+  ];
+  els.configSummary.innerHTML = rows.map(([label, value]) => `
+    <div class="sum-row"><span>${escapeHtml(label)}</span><strong>${escapeHtml(String(value))}</strong></div>
+  `).join("");
+
+  els.presetCards.innerHTML = (config.presets ?? []).map((preset) => {
+    const active = preset.kind === config.kind;
+    return `
+      <div class="preset ${active ? "active" : ""}">
+        <div class="preset-head">
+          <h3>${escapeHtml(preset.label)}</h3>
+          ${active ? '<span class="badge sm ok">active</span>' : ""}
+        </div>
+        <p class="muted-sm">${escapeHtml(preset.note)}</p>
+        <button class="btn ${active ? "ghost" : "primary"} block" data-preset="${escapeAttr(preset.id)}" type="button" ${active ? "disabled" : ""}>
+          ${active ? "Currently active" : "Switch to this"}
+        </button>
+      </div>
+    `;
+  }).join("");
+
+  els.fieldBaseUrl.value = provider.baseUrl ?? "";
+  els.fieldWireApi.value = provider.wireApi ?? "responses";
+  els.fieldModel.value = config.model ?? "";
+  els.fieldRequiresAuth.checked = provider.requiresOpenaiAuth === true;
+  els.fieldBearerValue.value = config.bearer?.value ?? "";
+  els.fieldBearerValue.type = "password";
+
+  renderSyncHint();
+  renderProfileList();
+}
+
+function renderSyncHint() {
+  const active = state.config?.modelProvider;
+  const mismatched = providerCounts().filter(([p]) => p !== active).reduce((sum, [, c]) => sum + c, 0);
+  if (!active) {
+    els.syncHint.textContent = "No active provider id set.";
+    els.syncButton.disabled = true;
+  } else if (mismatched > 0) {
+    els.syncHint.innerHTML = `<span class="warn-text">${mismatched} chat(s) hidden under another provider.</span> Sync retags them to <code>${escapeHtml(active)}</code>.`;
+    els.syncButton.disabled = false;
+  } else {
+    els.syncHint.textContent = "All chats match this provider.";
+    els.syncButton.disabled = true;
+  }
+}
+
+function renderProfileList() {
+  const profiles = state.config?.profiles ?? [];
+  if (!profiles.length) {
+    els.profileList.innerHTML = `<div class="empty">No saved profiles.</div>`;
+    return;
+  }
+  els.profileList.innerHTML = profiles.map((profile) => `
+    <div class="profile ${profile.active ? "active" : ""}">
+      <div>
+        <div class="chat-title">${escapeHtml(profile.label)} ${profile.active ? '<span class="badge sm ok">active</span>' : ""}</div>
+        <div class="chat-sub"><span>${escapeHtml(profile.kind)}</span>${profile.note ? `<span class="dot">·</span><span>${escapeHtml(profile.note)}</span>` : ""}</div>
+      </div>
+      <div class="profile-actions">
+        <button class="link" data-apply-profile="${escapeAttr(profile.id)}" type="button" ${profile.missing ? "disabled" : ""}>Apply</button>
+        <button class="link danger" data-delete-profile="${escapeAttr(profile.id)}" type="button">Delete</button>
+      </div>
+    </div>
+  `).join("");
+}
+
+function changeSummaryText(result) {
+  if (result.mode === "profile") {
+    return `Replace config.toml with profile "${result.profile?.label ?? result.profile?.id}".\nBacked up first and restorable.`;
+  }
+  if (!result.changes?.length) return "No changes; config already matches.";
+  const lines = result.changes.map((c) => `${c.scope}.${c.key}:  ${c.before === null ? "(unset)" : c.before}  →  ${c.after === null ? "(removed)" : c.after}`);
+  return `${lines.join("\n")}\n\nBacked up first and restorable.`;
+}
+
+async function previewAndApply(payload, title) {
+  try {
+    const preview = await apiPost("/api/config/apply", payload);
+    if (preview.mode === "fields" && !preview.changes?.length) {
+      showToast("No changes; config already matches.");
+      return;
+    }
+    openModal({
+      title,
+      body: changeSummaryText(preview),
+      executeLabel: "Apply",
+      onExecute: () => apiPost("/api/config/apply", { ...payload, confirmed: true })
+    });
+  } catch (error) {
+    showToast(error.message);
+  }
+}
+
+function applyFieldsFromForm() {
+  const fields = {
+    baseUrl: els.fieldBaseUrl.value.trim(),
+    wireApi: els.fieldWireApi.value,
+    model: els.fieldModel.value.trim(),
+    requiresOpenaiAuth: els.fieldRequiresAuth.checked
+  };
+  const current = state.config?.bearer?.value ?? "";
+  const next = els.fieldBearerValue.value.trim();
+  if (next !== current) fields.bearer = next === "" ? "remove" : next;
+  previewAndApply({ fields }, "Apply config changes");
+}
+
+// --- data loading ----------------------------------------------------------
+
+async function loadThreads() {
+  state.threads = await apiGet("/api/threads", {
+    project: state.selectedProject,
+    provider: state.selectedProvider,
+    archived: els.archivedOnly.checked ? "1" : ""
+  });
 }
 
 async function loadAll() {
@@ -261,171 +406,222 @@ async function loadAll() {
     state.status = status;
     state.projects = projects;
     state.backups = backups;
-    if (state.selectedProject && !state.projects.some((project) => project.path === state.selectedProject)) {
-      state.selectedProject = "";
+    if (!state.codexHome && status.codexHome) {
+      state.codexHome = status.codexHome;
+      els.codexHomeInput.value = status.codexHome;
     }
+    if (state.selectedProject && !projects.some((p) => p.path === state.selectedProject)) state.selectedProject = "";
     await loadThreads();
-    if (state.selectedThreadId && !state.threads.some((thread) => thread.id === state.selectedThreadId)) {
-      state.selectedThreadId = "";
-    }
-    renderAll();
+    renderChats();
+    renderBackups();
   } catch (error) {
     showToast(error.message);
   }
-}
-
-async function loadThreads() {
-  state.threads = await apiGet("/api/threads", {
-    project: state.selectedProject,
-    provider: state.selectedProvider,
-    archived: els.archivedOnly.checked ? "1" : ""
-  });
 }
 
 async function refreshThreads() {
   try {
     await loadThreads();
-    renderThreads();
-    renderSelection();
+    renderChats();
   } catch (error) {
     showToast(error.message);
   }
 }
 
-function openModal({ title, body, executeLabel = "Execute", onExecute }) {
-  els.modalTitle.textContent = title;
-  els.modalBody.textContent = typeof body === "string" ? body : JSON.stringify(body, null, 2);
-  els.modalExecute.textContent = executeLabel;
-  els.modalExecute.onclick = async () => {
-    try {
-      const result = await onExecute?.();
-      closeModal();
-      showToast("Done");
-      await loadAll();
-      if (result) console.log(result);
-    } catch (error) {
-      showToast(error.message);
+async function loadConfig() {
+  try {
+    state.config = await apiGet("/api/config");
+    if (!state.codexHome && state.config.codexHome) {
+      state.codexHome = state.config.codexHome;
+      els.codexHomeInput.value = state.config.codexHome;
     }
-  };
-  els.modal.classList.remove("hidden");
+    renderConfig();
+  } catch (error) {
+    showToast(error.message);
+  }
 }
 
-function closeModal() {
-  els.modal.classList.add("hidden");
+function setView(view) {
+  state.view = view;
+  tabs.forEach((tab) => tab.classList.toggle("active", tab.dataset.view === view));
+  $("view-chats").classList.toggle("hidden", view !== "chats");
+  $("view-config").classList.toggle("hidden", view !== "config");
+  if (view === "config" && !state.config) loadConfig();
 }
 
-async function confirmTrashThread() {
-  const thread = state.threads.find((item) => item.id === state.selectedThreadId);
+// --- events ----------------------------------------------------------------
+
+tabs.forEach((tab) => tab.addEventListener("click", () => setView(tab.dataset.view)));
+
+els.settingsBtn.addEventListener("click", () => els.settingsPop.classList.toggle("hidden"));
+els.refreshButton.addEventListener("click", async () => {
+  await loadAll();
+  if (state.view === "config") await loadConfig();
+});
+
+els.searchInput.addEventListener("input", () => { renderMeta(); renderThreadList(); });
+els.archivedOnly.addEventListener("change", refreshThreads);
+els.projectFilter.addEventListener("change", () => {
+  state.selectedProject = els.projectFilter.value;
+  refreshThreads();
+});
+els.providerFilter.addEventListener("change", () => {
+  state.selectedProvider = els.providerFilter.value;
+  refreshThreads();
+});
+
+els.threadList.addEventListener("click", (event) => {
+  const button = event.target.closest("[data-trash]");
+  if (!button) return;
+  const thread = state.threads.find((t) => t.id === button.dataset.trash);
   if (!thread) return;
   openModal({
-    title: "Delete Chat",
-    body: {
-      id: thread.id,
-      title: thread.title,
-      cwd: thread.cwd,
-      provider: thread.model_provider,
-      effect: "This chat row and its rollout file will be moved into a restorable backup."
-    },
-    executeLabel: "Delete Chat",
+    title: "Delete chat",
+    body: `"${thread.title || "(untitled)"}"\n${shortPath(thread.cwd)}\n\nThe chat and its rollout move into a restorable backup.`,
+    executeLabel: "Delete",
     onExecute: () => apiPost("/api/trash-thread", { threadId: thread.id, confirmed: true })
   });
-}
+});
 
-async function confirmDeleteProject() {
-  const project = state.projects.find((item) => item.path === state.selectedProject);
+els.deleteProjectBtn.addEventListener("click", () => {
+  const project = state.projects.find((p) => p.path === state.selectedProject);
   if (!project) return;
   openModal({
-    title: "Delete Project",
-    body: {
-      project: project.path,
-      chats: project.total,
-      archivedChats: project.archived,
-      effect: "All chats whose cwd exactly matches this project path will be moved into a restorable backup."
-    },
-    executeLabel: "Delete Project",
-    onExecute: () => apiPost("/api/delete-project", {
-      project: project.path,
-      confirmed: true
-    })
+    title: "Delete project",
+    body: `${shortPath(project.path)}\n${project.total} chats (${project.archived} archived)\n\nAll chats whose cwd matches this path move into a restorable backup.`,
+    executeLabel: "Delete project",
+    onExecute: () => apiPost("/api/delete-project", { project: project.path, confirmed: true })
   });
-}
-
-function escapeHtml(value) {
-  return String(value)
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&#039;");
-}
-
-function escapeAttr(value) {
-  return escapeHtml(value);
-}
-
-els.refreshButton.addEventListener("click", loadAll);
-els.reloadBackups.addEventListener("click", loadAll);
-els.searchInput.addEventListener("input", renderThreads);
-els.archivedOnly.addEventListener("change", refreshThreads);
-els.clearFilters.addEventListener("click", async () => {
-  state.selectedProject = "";
-  state.selectedProvider = "";
-  state.selectedThreadId = "";
-  els.searchInput.value = "";
-  els.archivedOnly.checked = false;
-  await refreshThreads();
-  renderProjects();
-  renderProviders();
-  renderSelection();
 });
 
-els.projectList.addEventListener("click", async (event) => {
-  const button = event.target.closest("[data-project]");
+els.backupsBtn.addEventListener("click", () => {
+  const hidden = els.backupsPanel.classList.toggle("hidden");
+  els.backupsBtn.classList.toggle("active", !hidden);
+});
+
+els.backupsPanel.addEventListener("click", (event) => {
+  const button = event.target.closest("[data-restore]");
   if (!button) return;
-  state.selectedProject = button.dataset.project;
-  state.selectedThreadId = "";
-  await refreshThreads();
-  renderProjects();
-  renderSelection();
-});
-
-els.providerList.addEventListener("click", async (event) => {
-  const button = event.target.closest("[data-provider]");
-  if (!button) return;
-  state.selectedProvider = button.dataset.provider;
-  state.selectedThreadId = "";
-  await refreshThreads();
-  renderProviders();
-  renderSelection();
-});
-
-els.threadRows.addEventListener("click", (event) => {
-  const row = event.target.closest("[data-thread]");
-  if (!row) return;
-  state.selectedThreadId = row.dataset.thread;
-  renderThreads();
-  renderSelection();
-});
-
-els.backupList.addEventListener("click", (event) => {
-  const button = event.target.closest("[data-backup]");
-  if (!button) return;
-  const backup = state.backups.find((item) => item.path === button.dataset.backup);
+  const backup = state.backups.find((b) => b.path === button.dataset.restore);
   if (!backup) return;
   openModal({
-    title: "Restore Backup",
-    body: backup,
+    title: "Restore backup",
+    body: `${backup.reason || "backup"}\n${new Date(backup.createdAt).toLocaleString()}\n\nThis restores the database and config from this backup (a pre-restore backup is taken first).`,
     executeLabel: "Restore",
     onExecute: () => apiPost("/api/restore", { backupDir: backup.path, confirmed: true })
   });
 });
 
-els.confirmTrashThread.addEventListener("click", confirmTrashThread);
-els.confirmDeleteProject.addEventListener("click", confirmDeleteProject);
+els.presetCards.addEventListener("click", (event) => {
+  const button = event.target.closest("[data-preset]");
+  if (!button) return;
+  const preset = state.config?.presets?.find((p) => p.id === button.dataset.preset);
+  previewAndApply({ preset: button.dataset.preset }, `Switch to ${preset ? preset.label : button.dataset.preset}`);
+});
+
+els.configForm.addEventListener("submit", (event) => {
+  event.preventDefault();
+  applyFieldsFromForm();
+});
+
+els.bearerReveal.addEventListener("click", () => {
+  els.fieldBearerValue.type = els.fieldBearerValue.type === "password" ? "text" : "password";
+});
+
+// Raw file editor (config.toml / auth.json)
+async function loadRawFile(file) {
+  try {
+    const data = await apiGet("/api/config/file", { file });
+    els.rawEditor.value = data.raw ?? "";
+    els.rawPath.textContent = data.path + (data.exists ? "" : "  (missing)");
+  } catch (error) {
+    showToast(error.message);
+  }
+}
+
+document.querySelectorAll(".raw-tab").forEach((tab) => {
+  tab.addEventListener("click", () => {
+    state.rawFile = tab.dataset.file;
+    document.querySelectorAll(".raw-tab").forEach((t) => t.classList.toggle("active", t === tab));
+    loadRawFile(state.rawFile);
+  });
+});
+
+els.rawDetails.addEventListener("toggle", () => {
+  if (els.rawDetails.open) loadRawFile(state.rawFile);
+});
+
+els.rawReload.addEventListener("click", () => loadRawFile(state.rawFile));
+
+els.rawSave.addEventListener("click", () => {
+  const file = state.rawFile;
+  const content = els.rawEditor.value;
+  const name = file === "auth" ? "auth.json" : "config.toml";
+  openModal({
+    title: `Save ${name}`,
+    body: `Overwrite ${name} with the editor contents?\n\n${file === "auth" ? "It must be valid JSON. " : ""}A backup is taken first and is restorable.`,
+    executeLabel: "Save",
+    onExecute: async () => {
+      const result = await apiPost("/api/config/file", { file, content, confirmed: true });
+      await loadConfig();
+      return result;
+    }
+  });
+});
+
+els.syncButton.addEventListener("click", async () => {
+  try {
+    const preview = await apiPost("/api/config/sync", {});
+    if (preview.noOp || preview.total === 0) {
+      showToast(`Nothing to sync; all chats use "${preview.target}".`);
+      return;
+    }
+    const lines = (preview.groups ?? []).map((g) => `  ${g.provider}  →  ${preview.target}   (${g.count})`);
+    openModal({
+      title: "Sync chats to active provider",
+      body: `Retag ${preview.total} chat(s) to "${preview.target}":\n\n${lines.join("\n")}\n\nQuit Codex Desktop first. Backed up and restorable.`,
+      executeLabel: "Sync now",
+      onExecute: () => apiPost("/api/config/sync", { confirmed: true })
+    });
+  } catch (error) {
+    showToast(error.message);
+  }
+});
+
+els.saveProfileButton.addEventListener("click", async () => {
+  const label = window.prompt("Name this profile (snapshot of the current config.toml):");
+  if (!label || !label.trim()) return;
+  try {
+    await apiPost("/api/config/save-profile", { label: label.trim() });
+    showToast("Profile saved");
+    await loadConfig();
+  } catch (error) {
+    showToast(error.message);
+  }
+});
+
+els.profileList.addEventListener("click", (event) => {
+  const applyButton = event.target.closest("[data-apply-profile]");
+  if (applyButton) {
+    const profile = state.config?.profiles?.find((p) => p.id === applyButton.dataset.applyProfile);
+    previewAndApply({ profile: applyButton.dataset.applyProfile }, `Apply profile ${profile ? profile.label : ""}`);
+    return;
+  }
+  const deleteButton = event.target.closest("[data-delete-profile]");
+  if (deleteButton) {
+    const id = deleteButton.dataset.deleteProfile;
+    const profile = state.config?.profiles?.find((p) => p.id === id);
+    openModal({
+      title: "Delete profile",
+      body: `Delete saved profile "${profile ? profile.label : id}"?\nThis only removes the snapshot, not your live config.`,
+      executeLabel: "Delete",
+      onExecute: () => apiPost("/api/config/delete-profile", { id, confirmed: true })
+    });
+  }
+});
+
 els.modalClose.addEventListener("click", closeModal);
 els.modalCancel.addEventListener("click", closeModal);
-els.modal.addEventListener("click", (event) => {
-  if (event.target === els.modal) closeModal();
-});
+els.modal.addEventListener("click", (event) => { if (event.target === els.modal) closeModal(); });
 
 loadAll();
