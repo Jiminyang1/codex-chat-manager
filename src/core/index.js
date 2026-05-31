@@ -1092,45 +1092,14 @@ function assertNoReservedProviderBlock(text) {
   }
 }
 
-function setProviderHeader(lines, index, providerId) {
-  lines[index] = lines[index].replace(
-    /^\s*\[model_providers\.(?:"[^"]+"|[^\]]+)\]\s*$/,
-    `[model_providers.${providerId}]`
-  );
-}
-
-function normalizeProviderConfigText(text, providerId, label = "") {
-  const safeProviderId = String(providerId ?? "").trim();
-  const safeLabel = String(label ?? "").trim();
-  const lines = text ? text.split("\n") : [];
-  let [, topEnd] = topLevelRange(lines);
-  const previousProvider = summarizeConfig(text).configuredModelProvider ?? safeProviderId;
-  const setProvider = setScalarInRange(lines, 0, topEnd, "model_provider", safeProviderId, topEnd);
-  if (setProvider.inserted) topEnd += 1;
-
-  let range = providerRange(lines, safeProviderId);
-  if (!range && previousProvider && previousProvider !== safeProviderId) {
-    const previousRange = providerRange(lines, previousProvider);
-    if (previousRange) {
-      setProviderHeader(lines, previousRange[0], safeProviderId);
-      range = providerRange(lines, safeProviderId);
-    }
+function assertProviderConfigMatchesId(text, providerId) {
+  const summary = summarizeConfig(text);
+  if (summary.modelProvider !== providerId) {
+    throw new Error(`config.toml model_provider must match Provider ID "${providerId}".`);
   }
-  if (!range) {
-    const needsSpacer = lines.length && lines.at(-1)?.trim();
-    if (needsSpacer) lines.push("");
-    lines.push(`[model_providers.${safeProviderId}]`);
-    lines.push(`name = ${formatTomlValue(safeLabel || safeProviderId)}`);
-    range = [lines.length - 2, lines.length];
+  if (!summary.provider) {
+    throw new Error(`config.toml must define [model_providers.${providerId}].`);
   }
-  const [start, end] = range;
-  const name = readScalarInRange(lines, start, end, "name");
-  if (name === undefined || (previousProvider !== safeProviderId && name === previousProvider)) {
-    setScalarInRange(lines, start, end, "name", safeLabel || safeProviderId, end);
-  }
-
-  const next = lines.join("\n");
-  return next.endsWith("\n") ? next : `${next}\n`;
 }
 
 
@@ -1503,7 +1472,6 @@ async function listProfiles(home, currentText) {
     if (entry.autoManaged === true && entry.id === OFFICIAL_PROFILE_ID) continue;
     const file = path.join(profileDir(home), `${entry.id}.toml`);
     const snapshot = await readTextIfPresent(file, null);
-    const summary = snapshot === null ? null : summarizeConfig(snapshot);
     profiles.push({
       id: entry.id,
       label: entry.label ?? entry.id,
@@ -1512,7 +1480,7 @@ async function listProfiles(home, currentText) {
       createdAt: entry.createdAt ?? null,
       updatedAt: entry.updatedAt ?? null,
       autoDetected: entry.autoDetected === true,
-      providerId: entry.providerId ?? summary?.modelProvider ?? null,
+      providerId: entry.providerId ?? null,
       missing: snapshot === null,
       hasAuth: entry.hasAuth === true,
       active: snapshot !== null && snapshot === currentText
@@ -1593,8 +1561,9 @@ async function createProvider(home, {
   if (typeof configText !== "string" || !configText.trim()) {
     throw new Error("configText is required");
   }
-  const normalizedConfigText = normalizeProviderConfigText(configText, safeProviderId, safeLabel);
-  assertNoReservedProviderBlock(normalizedConfigText);
+  assertNoReservedProviderBlock(configText);
+  assertProviderConfigMatchesId(configText, safeProviderId);
+  const normalizedConfigText = configText.endsWith("\n") ? configText : `${configText}\n`;
 
   let normalizedAuthText = null;
   if (typeof authText === "string" && authText.trim()) {
