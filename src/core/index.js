@@ -1092,6 +1092,47 @@ function assertNoReservedProviderBlock(text) {
   }
 }
 
+function setProviderHeader(lines, index, providerId) {
+  lines[index] = lines[index].replace(
+    /^\s*\[model_providers\.(?:"[^"]+"|[^\]]+)\]\s*$/,
+    `[model_providers.${providerId}]`
+  );
+}
+
+function normalizeProviderConfigText(text, providerId, label = "") {
+  const safeProviderId = String(providerId ?? "").trim();
+  const safeLabel = String(label ?? "").trim();
+  const lines = text ? text.split("\n") : [];
+  let [, topEnd] = topLevelRange(lines);
+  const previousProvider = summarizeConfig(text).configuredModelProvider ?? safeProviderId;
+  const setProvider = setScalarInRange(lines, 0, topEnd, "model_provider", safeProviderId, topEnd);
+  if (setProvider.inserted) topEnd += 1;
+
+  let range = providerRange(lines, safeProviderId);
+  if (!range && previousProvider && previousProvider !== safeProviderId) {
+    const previousRange = providerRange(lines, previousProvider);
+    if (previousRange) {
+      setProviderHeader(lines, previousRange[0], safeProviderId);
+      range = providerRange(lines, safeProviderId);
+    }
+  }
+  if (!range) {
+    const needsSpacer = lines.length && lines.at(-1)?.trim();
+    if (needsSpacer) lines.push("");
+    lines.push(`[model_providers.${safeProviderId}]`);
+    lines.push(`name = ${formatTomlValue(safeLabel || safeProviderId)}`);
+    range = [lines.length - 2, lines.length];
+  }
+  const [start, end] = range;
+  const name = readScalarInRange(lines, start, end, "name");
+  if (name === undefined || (previousProvider !== safeProviderId && name === previousProvider)) {
+    setScalarInRange(lines, start, end, "name", safeLabel || safeProviderId, end);
+  }
+
+  const next = lines.join("\n");
+  return next.endsWith("\n") ? next : `${next}\n`;
+}
+
 
 async function readAuthSummary(home) {
   const auth = await readJsonIfPresent(authPath(home), null);
@@ -1430,7 +1471,13 @@ async function writeProfileFile(home, profileId, file, content, { execute }) {
     return { dryRun: true, file: safeFile, path: filePath, bytes: Buffer.byteLength(content, "utf8") };
   }
   await fs.writeFile(filePath, content);
-  if (safeFile === "auth" && entry.hasAuth !== true) {
+  if (safeFile === "config") {
+    const summary = summarizeConfig(content);
+    const profiles = await readProfileIndex(home);
+    await writeProfileIndex(home, profiles.map((profile) => (
+      profile.id === entry.id ? { ...profile, providerId: summary.modelProvider, kind: providerKind(summary.provider, summary.modelProvider) } : profile
+    )));
+  } else if (entry.hasAuth !== true) {
     const profiles = await readProfileIndex(home);
     await writeProfileIndex(home, profiles.map((profile) => (
       profile.id === entry.id ? { ...profile, hasAuth: true } : profile
@@ -1456,6 +1503,7 @@ async function listProfiles(home, currentText) {
     if (entry.autoManaged === true && entry.id === OFFICIAL_PROFILE_ID) continue;
     const file = path.join(profileDir(home), `${entry.id}.toml`);
     const snapshot = await readTextIfPresent(file, null);
+    const summary = snapshot === null ? null : summarizeConfig(snapshot);
     profiles.push({
       id: entry.id,
       label: entry.label ?? entry.id,
@@ -1464,7 +1512,7 @@ async function listProfiles(home, currentText) {
       createdAt: entry.createdAt ?? null,
       updatedAt: entry.updatedAt ?? null,
       autoDetected: entry.autoDetected === true,
-      providerId: entry.providerId ?? null,
+      providerId: entry.providerId ?? summary?.modelProvider ?? null,
       missing: snapshot === null,
       hasAuth: entry.hasAuth === true,
       active: snapshot !== null && snapshot === currentText
@@ -1515,6 +1563,7 @@ async function saveProfile(home, { label, note = "", kind }) {
     label,
     note,
     kind: kind ?? providerKind(summary.provider, summary.modelProvider),
+    providerId: summary.modelProvider,
     hasAuth,
     createdAt: new Date().toISOString()
   };
@@ -1544,7 +1593,8 @@ async function createProvider(home, {
   if (typeof configText !== "string" || !configText.trim()) {
     throw new Error("configText is required");
   }
-  assertNoReservedProviderBlock(configText);
+  const normalizedConfigText = normalizeProviderConfigText(configText, safeProviderId, safeLabel);
+  assertNoReservedProviderBlock(normalizedConfigText);
 
   let normalizedAuthText = null;
   if (typeof authText === "string" && authText.trim()) {
@@ -1559,7 +1609,7 @@ async function createProvider(home, {
     label: safeLabel,
     note: "",
     kind: "third-party",
-    configText: configText.endsWith("\n") ? configText : `${configText}\n`,
+    configText: normalizedConfigText,
     authText: normalizedAuthText
   });
   if (shouldSwitch) {
@@ -1577,11 +1627,13 @@ async function saveProfileFromText(home, { label, note = "", kind = "custom", co
     await fs.writeFile(path.join(profileDir(home), `${id}.auth.json`), authText);
   }
   const profiles = await readProfileIndex(home);
+  const summary = summarizeConfig(configText);
   const entry = {
     id,
     label,
     note,
     kind,
+    providerId: summary.modelProvider,
     hasAuth,
     createdAt: new Date().toISOString()
   };

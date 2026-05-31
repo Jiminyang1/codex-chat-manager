@@ -545,11 +545,33 @@ test("provider:create saves user-edited raw config and auth profile files", asyn
 
   assert.equal(result.saved, true);
   assert.equal(result.switched, false);
+  assert.equal(result.profile.providerId, "axis");
   const profileDir = path.join(home, "chat-manager-profiles");
   const configText = await fs.readFile(path.join(profileDir, `${result.profile.id}.toml`), "utf8");
   const auth = JSON.parse(await fs.readFile(path.join(profileDir, `${result.profile.id}.auth.json`), "utf8"));
   assert.equal(configText, rawConfig);
   assert.equal(auth.OPENAI_API_KEY, "sk-axis");
+});
+
+test("provider:create aligns raw config provider id with the form provider id", async () => {
+  const home = await makeConfigHome();
+  const rawConfig = 'model_provider = "openai-custom"\nmodel = "gpt-5.5"\n\n[model_providers.openai-custom]\nname = "openai-custom"\nbase_url = "https://api.axis.fan"\nwire_api = "responses"\n';
+  const result = await invokeAction("provider:create", {
+    codexHome: home,
+    label: "axis",
+    providerId: "axis",
+    configText: rawConfig,
+    authText: '{ "OPENAI_API_KEY": "sk-axis" }\n',
+    switch: false
+  });
+
+  const profileDir = path.join(home, "chat-manager-profiles");
+  const configText = await fs.readFile(path.join(profileDir, `${result.profile.id}.toml`), "utf8");
+  assert.match(configText, /^model_provider = "axis"$/m);
+  assert.match(configText, /^\[model_providers\.axis\]$/m);
+  assert.match(configText, /^name = "axis"$/m);
+  assert.doesNotMatch(configText, /openai-custom/);
+  assert.equal(result.profile.providerId, "axis");
 });
 
 test("provider:create rejects invalid auth JSON", async () => {
