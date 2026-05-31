@@ -1092,14 +1092,22 @@ function assertNoReservedProviderBlock(text) {
   }
 }
 
-function assertProviderConfigMatchesId(text, providerId) {
+function providerIdFromConfigText(text) {
   const summary = summarizeConfig(text);
-  if (summary.modelProvider !== providerId) {
-    throw new Error(`config.toml model_provider must match Provider ID "${providerId}".`);
+  const providerId = summary.configuredModelProvider;
+  if (!providerId) {
+    throw new Error("config.toml must set model_provider for a custom provider.");
+  }
+  if (!/^[A-Za-z0-9._-]+$/.test(providerId)) {
+    throw new Error("model_provider may only contain letters, numbers, dot, underscore, and hyphen");
+  }
+  if (isReservedProviderId(providerId)) {
+    throw new Error(`"${providerId}" is a reserved built-in provider. Use a custom id like "openai-custom".`);
   }
   if (!summary.provider) {
     throw new Error(`config.toml must define [model_providers.${providerId}].`);
   }
+  return providerId;
 }
 
 
@@ -1542,27 +1550,18 @@ async function saveProfile(home, { label, note = "", kind }) {
 
 async function createProvider(home, {
   label,
-  providerId,
   configText,
   authText,
   switch: shouldSwitch = false
 }) {
   const safeLabel = String(label ?? "").trim();
-  const safeProviderId = String(providerId ?? "").trim();
   if (!safeLabel) throw new Error("label is required");
-  if (!safeProviderId) throw new Error("providerId is required");
-  if (!/^[A-Za-z0-9._-]+$/.test(safeProviderId)) {
-    throw new Error("providerId may only contain letters, numbers, dot, underscore, and hyphen");
-  }
-  if (isReservedProviderId(safeProviderId)) {
-    throw new Error(`"${safeProviderId}" is a reserved built-in provider. Use a custom id like "openai-custom".`);
-  }
 
   if (typeof configText !== "string" || !configText.trim()) {
     throw new Error("configText is required");
   }
   assertNoReservedProviderBlock(configText);
-  assertProviderConfigMatchesId(configText, safeProviderId);
+  providerIdFromConfigText(configText);
   const normalizedConfigText = configText.endsWith("\n") ? configText : `${configText}\n`;
 
   let normalizedAuthText = null;

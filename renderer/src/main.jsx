@@ -48,6 +48,10 @@ function profileSummary(raw) {
   };
 }
 
+function providerIdFromConfig(raw) {
+  return raw?.match(/^model_provider\s*=\s*"?(.+?)"?\s*$/m)?.[1]?.replaceAll("\"", "").trim() ?? "";
+}
+
 function officialSwitchMessage(snapshot) {
   if (snapshot?.source === "profile" && snapshot.hasOfficialAuth !== false) {
     const label = snapshot.autoManaged ? "the auto-saved OpenAI Official snapshot" : `"${snapshot.label}"`;
@@ -110,7 +114,6 @@ function App() {
   const [editor, setEditor] = useState(null);
   const [newProvider, setNewProvider] = useState({
     label: "",
-    providerId: "",
     configText: "",
     authText: "",
     switch: true
@@ -461,14 +464,13 @@ function App() {
     try {
       const providerPayload = {
         ...newProvider,
-        configText: newProvider.configText || defaultProviderConfig(newProvider.providerId),
+        configText: newProvider.configText || defaultProviderConfig(providerIdFromLabel(newProvider.label) || "custom"),
         authText: newProvider.authText || defaultProviderAuth()
       };
       const didCreate = await runMutation("provider:create", providerPayload, "Provider created and active");
       if (!didCreate) return;
       setNewProvider({
         label: "",
-        providerId: "",
         configText: "",
         authText: "",
         switch: true
@@ -819,28 +821,21 @@ function defaultProviderAuth() {
 }
 
 function NewProviderModal({ draft, setDraft, onCancel, onSubmit }) {
-  const configText = draft.configText || defaultProviderConfig(draft.providerId);
+  const defaultId = providerIdFromLabel(draft.label) || "custom";
+  const configText = draft.configText || defaultProviderConfig(defaultId);
   const authText = draft.authText || defaultProviderAuth();
+  const providerId = providerIdFromConfig(configText);
 
   function update(patch) {
     setDraft({ ...draft, ...patch });
   }
 
   function updateLabel(value) {
-    const nextProviderId = (!draft.providerId || draft.providerId === providerIdFromLabel(draft.label))
-      ? providerIdFromLabel(value)
-      : draft.providerId;
+    const previousId = providerIdFromLabel(draft.label) || "custom";
+    const nextProviderId = providerIdFromLabel(value) || "custom";
     update({
       label: value,
-      providerId: nextProviderId,
-      configText: updateProviderIdInDraftConfig(draft.configText, draft.providerId, nextProviderId)
-    });
-  }
-
-  function updateProviderId(value) {
-    update({
-      providerId: value,
-      configText: updateProviderIdInDraftConfig(draft.configText, draft.providerId, value)
+      configText: updateProviderIdInDraftConfig(draft.configText, previousId, nextProviderId)
     });
   }
 
@@ -859,7 +854,7 @@ function NewProviderModal({ draft, setDraft, onCancel, onSubmit }) {
             </label>
             <label className="field">
               <span>Provider ID</span>
-              <input value={draft.providerId} onChange={(event) => updateProviderId(event.target.value)} placeholder="axis" required />
+              <input value={providerId} placeholder="from config.toml" readOnly />
             </label>
           </div>
           <label className="field">
