@@ -284,7 +284,7 @@ function App() {
 
   useEffect(() => {
     if (providerItems.length && !providerItems.some((item) => item.id === selectedProviderCard)) {
-      setSelectedProviderCard(providerItems[0].id);
+      setSelectedProviderCard(providerItems.find((item) => item.active)?.id ?? providerItems[0].id);
     }
   }, [providerItems, selectedProviderCard]);
 

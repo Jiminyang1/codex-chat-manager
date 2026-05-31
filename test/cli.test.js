@@ -598,17 +598,56 @@ test("custom Codex provider remains third-party when requires_openai_auth is tru
   assert.equal(overview.kind, "third-party");
 });
 
-test("config:get auto-adds the current third-party provider without duplicating it", async () => {
+test("config:get does not auto-add the current third-party provider", async () => {
   const home = await makeConfigHome('model_provider = "axis"\nmodel = "gpt-5.5"\n\n[model_providers.axis]\nname = "axis"\nbase_url = "https://api.axis.fan"\nwire_api = "responses"\n');
 
-  const first = await invokeAction("config:get", { codexHome: home });
-  const second = await invokeAction("config:get", { codexHome: home });
+  const overview = await invokeAction("config:get", { codexHome: home });
 
-  assert.equal(first.autoThirdPartyProfile.profile.id, "current-provider-axis");
-  assert.equal(second.autoThirdPartyProfile.profile.id, "current-provider-axis");
-  assert.equal(second.profiles.filter((profile) => profile.id === "current-provider-axis").length, 1);
-  assert.equal(await exists(path.join(home, "chat-manager-profiles", "current-provider-axis.toml")), true);
-  assert.equal(await exists(path.join(home, "chat-manager-profiles", "current-provider-axis.auth.json")), true);
+  assert.equal(overview.autoThirdPartyProfile.removed, 0);
+  assert.equal(overview.profiles.length, 0);
+  assert.equal(await exists(path.join(home, "chat-manager-profiles", "current-provider-axis.toml")), false);
+  assert.equal(await exists(path.join(home, "chat-manager-profiles", "current-provider-axis.auth.json")), false);
+});
+
+test("config:get shows an existing profile active by provider id", async () => {
+  const home = await makeConfigHome();
+  const saved = JSON.parse((await runCli(["config-save-profile", "axis", "--codex-home", home, "--json"])).stdout);
+
+  const overview = await invokeAction("config:get", { codexHome: home });
+
+  const matching = overview.profiles.filter((profile) => profile.providerId === "openai-custom");
+  assert.equal(matching.length, 1);
+  assert.equal(matching[0].id, saved.profile.id);
+  assert.equal(matching[0].active, true);
+  assert.equal(await exists(path.join(home, "chat-manager-profiles", "current-provider-openai-custom.toml")), false);
+});
+
+test("config:get removes old auto-detected third-party profiles", async () => {
+  const home = await makeConfigHome();
+  const profileDir = path.join(home, "chat-manager-profiles");
+  await fs.mkdir(profileDir, { recursive: true });
+  await fs.writeFile(path.join(profileDir, "profiles.json"), JSON.stringify({
+    version: 1,
+    profiles: [{
+      id: "current-provider-openai-custom",
+      label: "openai-custom",
+      kind: "third-party",
+      providerId: "openai-custom",
+      autoDetected: true,
+      hasAuth: true,
+      createdAt: new Date().toISOString()
+    }]
+  }));
+  await fs.writeFile(path.join(profileDir, "current-provider-openai-custom.toml"), SAMPLE_CONFIG);
+  await fs.writeFile(path.join(profileDir, "current-provider-openai-custom.auth.json"), "{}\n");
+
+  const overview = await invokeAction("config:get", { codexHome: home });
+
+  assert.equal(overview.autoThirdPartyProfile.removed, 1);
+  assert.deepEqual(overview.autoThirdPartyProfile.ids, ["current-provider-openai-custom"]);
+  assert.equal(overview.profiles.length, 0);
+  assert.equal(await exists(path.join(profileDir, "current-provider-openai-custom.toml")), false);
+  assert.equal(await exists(path.join(profileDir, "current-provider-openai-custom.auth.json")), false);
 });
 
 test("reserved openai provider block is not treated as OpenAI Official", async () => {

@@ -15,7 +15,6 @@ const PROFILE_DIR = "chat-manager-profiles";
 const PROFILE_INDEX = "profiles.json";
 const OFFICIAL_PROFILE_ID = "openai-official";
 const OFFICIAL_PROFILE_LABEL = "OpenAI Official";
-const AUTO_PROVIDER_PREFIX = "current-provider-";
 const BUILTIN_PROVIDER_IDS = new Set(["openai"]);
 
 function codexHome(flags) {
@@ -1149,9 +1148,35 @@ function officialProfileAuthPath(home) {
   return path.join(profileDir(home), `${OFFICIAL_PROFILE_ID}.auth.json`);
 }
 
-function currentProviderProfileId(providerId) {
-  const safe = String(providerId ?? "custom").trim().toLowerCase().replace(/[^a-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "");
-  return `${AUTO_PROVIDER_PREFIX}${safe || "custom"}`;
+async function profileConfigText(home, profileId) {
+  return readTextIfPresent(path.join(profileDir(home), `${profileId}.toml`), null);
+}
+
+async function profileProviderId(home, entry) {
+  if (entry.providerId) return entry.providerId;
+  const configText = await profileConfigText(home, entry.id);
+  if (configText === null) return null;
+  return summarizeConfig(configText).modelProvider ?? null;
+}
+
+async function removeProfileSnapshotFiles(home, profileId) {
+  await fs.rm(path.join(profileDir(home), `${profileId}.toml`), { force: true });
+  await fs.rm(path.join(profileDir(home), `${profileId}.auth.json`), { force: true });
+}
+
+async function cleanupAutoDetectedThirdPartyProfiles(home) {
+  const profiles = await readProfileIndex(home);
+  const stale = profiles.filter((profile) => (
+    profile.autoDetected === true
+    && profile.autoManaged !== true
+    && profile.id !== OFFICIAL_PROFILE_ID
+  ));
+  if (!stale.length) return { removed: 0, ids: [] };
+  for (const profile of stale) {
+    await removeProfileSnapshotFiles(home, profile.id);
+  }
+  await writeProfileIndex(home, profiles.filter((profile) => !stale.some((item) => item.id === profile.id)));
+  return { removed: stale.length, ids: stale.map((profile) => profile.id) };
 }
 
 function upsertProfile(profiles, entry) {
@@ -1199,63 +1224,26 @@ async function ensureOfficialProviderSnapshot(home) {
   };
 }
 
-async function ensureCurrentThirdPartyProvider(home, configText, authText, summary) {
-  if (!summary.modelProvider || providerKind(summary.provider, summary.modelProvider) !== "third-party") {
-    return { saved: false, reason: "not-third-party" };
-  }
-  const id = currentProviderProfileId(summary.modelProvider);
-  const configFile = path.join(profileDir(home), `${id}.toml`);
-  const authFile = path.join(profileDir(home), `${id}.auth.json`);
-  await fs.mkdir(profileDir(home), { recursive: true });
-  const normalizedConfig = configText.endsWith("\n") ? configText : `${configText}\n`;
-  const wroteConfig = await writeTextIfChanged(configFile, normalizedConfig);
-  let wroteAuth = false;
-  if (authText !== null) {
-    const normalizedAuth = authText.endsWith("\n") ? authText : `${authText}\n`;
-    wroteAuth = await writeTextIfChanged(authFile, normalizedAuth);
-  } else if (await pathExists(authFile)) {
-    await fs.rm(authFile, { force: true });
-    wroteAuth = true;
-  }
-
-  const now = new Date().toISOString();
-  const profiles = await readProfileIndex(home);
-  const existing = profiles.find((profile) => profile.id === id);
-  const entry = {
-    ...(existing ?? {}),
-    id,
-    label: summary.provider?.name ?? summary.modelProvider,
-    note: "Detected from current Codex config.",
-    kind: "third-party",
-    hasAuth: authText !== null,
-    autoDetected: true,
-    providerId: summary.modelProvider,
-    updatedAt: now,
-    createdAt: existing?.createdAt ?? now
-  };
-  await writeProfileIndex(home, upsertProfile(profiles, entry));
-  return { saved: wroteConfig || wroteAuth || !existing, profile: entry, wroteConfig, wroteAuth };
-}
-
 async function reconcileCurrentProvider(home) {
+  const thirdPartyCleanup = await cleanupAutoDetectedThirdPartyProfiles(home);
   const configText = await readTextIfPresent(configPath(home), "") ?? "";
   const authText = await readTextIfPresent(authPath(home), null);
   const summary = summarizeConfig(configText);
   const kind = providerKind(summary.provider, summary.modelProvider);
   if (kind === "official" && isOfficialAuthText(authText)) {
-    return { kind, official: await ensureOfficialProviderSnapshot(home), thirdParty: { saved: false, reason: "not-third-party" } };
+    return { kind, official: await ensureOfficialProviderSnapshot(home), thirdParty: thirdPartyCleanup };
   }
   if (kind === "third-party") {
     return {
       kind,
       official: { saved: false, reason: "not-official-config" },
-      thirdParty: await ensureCurrentThirdPartyProvider(home, configText, authText, summary)
+      thirdParty: thirdPartyCleanup
     };
   }
   return {
     kind,
     official: { saved: false, reason: "not-official" },
-    thirdParty: { saved: false, reason: "not-third-party" }
+    thirdParty: thirdPartyCleanup
   };
 }
 
@@ -1482,9 +1470,31 @@ async function writeProfileIndex(home, profiles) {
 
 async function listProfiles(home, currentText) {
   const entries = await readProfileIndex(home);
-  const profiles = [];
+  const currentProviderId = summarizeConfig(currentText).modelProvider;
+  const visible = [];
+  const seenProviderIds = new Set();
   for (const entry of entries) {
     if (entry.autoManaged === true && entry.id === OFFICIAL_PROFILE_ID) continue;
+    const providerId = await profileProviderId(home, entry);
+    if (providerId) {
+      const key = `${entry.kind ?? "custom"}:${providerId}`;
+      const existingIndex = visible.findIndex((profile) => profile.key === key);
+      if (existingIndex !== -1) {
+        const previous = visible[existingIndex].entry;
+        if (previous.autoDetected === true && entry.autoDetected !== true) {
+          visible[existingIndex] = { key, entry, providerId };
+        }
+        continue;
+      }
+      if (entry.autoDetected === true && seenProviderIds.has(providerId)) continue;
+      seenProviderIds.add(providerId);
+      visible.push({ key, entry, providerId });
+    } else {
+      visible.push({ key: `missing:${entry.id}`, entry, providerId: null });
+    }
+  }
+  const profiles = [];
+  for (const { entry, providerId } of visible) {
     const file = path.join(profileDir(home), `${entry.id}.toml`);
     const snapshot = await readTextIfPresent(file, null);
     profiles.push({
@@ -1495,10 +1505,10 @@ async function listProfiles(home, currentText) {
       createdAt: entry.createdAt ?? null,
       updatedAt: entry.updatedAt ?? null,
       autoDetected: entry.autoDetected === true,
-      providerId: entry.providerId ?? null,
+      providerId,
       missing: snapshot === null,
       hasAuth: entry.hasAuth === true,
-      active: snapshot !== null && snapshot === currentText
+      active: providerId !== null && providerId === currentProviderId
     });
   }
   return profiles.sort((left, right) => String(right.createdAt).localeCompare(String(left.createdAt)));
