@@ -127,6 +127,7 @@ export async function invokeAction(action, payload = {}) {
     case "config:sync":
       return syncProviderTag(home, {
         toId: typeof payload.to === "string" && payload.to ? payload.to : undefined,
+        mode: payload.mode === "repair" ? "repair" : "retag",
         execute: executeFromPayload(payload)
       });
     case "profile:switch":

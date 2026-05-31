@@ -181,6 +181,11 @@ button svg { flex: 0 0 auto; }
 button:disabled { opacity: .45; cursor: not-allowed; }
 .wide { width: 100%; }
 .compact { min-height: 30px; padding: 0 10px; }
+.sync-panel { display: grid; gap: 8px; min-width: 0; }
+.sync-title { display: flex; align-items: center; justify-content: space-between; gap: 8px; color: var(--muted); font-size: 11px; font-weight: 700; text-transform: uppercase; }
+.help-button { width: 26px; height: 26px; min-height: 26px; padding: 0; border-radius: 7px; color: var(--muted); }
+.sync-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; min-width: 0; }
+.sync-actions button { width: 100%; padding: 0 8px; white-space: nowrap; }
 
 .file-panel { display: grid; gap: 8px; min-width: 0; }
 .file-empty { border: 1px solid var(--line); border-radius: 8px; background: #f3f2ef; color: var(--muted); padding: 11px 12px; }

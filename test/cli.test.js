@@ -478,6 +478,30 @@ test("config-sync repairs rollout-only provider mismatches", async () => {
   assert.equal(afterMeta.payload.model_provider, "openai");
 });
 
+test("config-sync repair mode does not merge provider tags", async () => {
+  const fixture = await makeFixture();
+  await fs.writeFile(path.join(fixture.home, "config.toml"), 'model_provider = "openai"\nmodel = "gpt-5.5"\n');
+  const lines = (await fs.readFile(fixture.rolloutPath, "utf8")).split("\n");
+  const meta = JSON.parse(lines[0]);
+  meta.payload.model_provider = "axis";
+  lines[0] = JSON.stringify(meta);
+  await fs.writeFile(fixture.rolloutPath, lines.join("\n"));
+
+  const preview = JSON.parse((await runCli(["config-sync", "--mode", "repair", "--codex-home", fixture.home, "--json"])).stdout);
+  assert.equal(preview.mode, "repair");
+  assert.equal(preview.total, 1);
+
+  const result = JSON.parse((await runCli(["config-sync", "--mode", "repair", "--codex-home", fixture.home, "--json", "--yes"])).stdout);
+  assert.equal(result.mode, "repair");
+  assert.equal(result.dbUpdated, 1);
+  assert.equal(result.rolloutUpdated, 0);
+  const db = new DatabaseSync(path.join(fixture.home, "state_5.sqlite"), { readOnly: true });
+  assert.equal(db.prepare("SELECT model_provider FROM threads WHERE id = ?").get(fixture.threadId).model_provider, "axis");
+  db.close();
+  const afterMeta = JSON.parse((await fs.readFile(fixture.rolloutPath, "utf8")).split("\n")[0]);
+  assert.equal(afterMeta.payload.model_provider, "axis");
+});
+
 test("config-show exposes the full bearer token and api key for editing", async () => {
   const home = await makeConfigHome();
   const overview = JSON.parse((await runCli(["config-show", "--codex-home", home, "--json"])).stdout);

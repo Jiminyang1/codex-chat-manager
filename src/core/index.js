@@ -410,6 +410,46 @@ async function collectProviderTagMismatches(home, target, { strictRolloutPaths =
   };
 }
 
+async function collectProviderConsistencyMismatches(home, { strictRolloutPaths = false } = {}) {
+  const threads = readThreads(home, { all: true });
+  const mismatches = [];
+  const groups = new Map();
+  for (const thread of threads) {
+    if (!thread.rollout_path || !(await pathExists(thread.rollout_path))) continue;
+    if (!isInsideDir(home, thread.rollout_path)) {
+      if (strictRolloutPaths) relativeInside(home, thread.rollout_path);
+      continue;
+    }
+    let meta;
+    try {
+      meta = await readRolloutMeta(thread.rollout_path);
+    } catch {
+      continue;
+    }
+    if (!Object.keys(meta).length) continue;
+    const rolloutProvider = meta.model_provider ?? null;
+    if (rolloutProvider === thread.model_provider) continue;
+    const targetProvider = rolloutProvider || thread.model_provider;
+    const key = `${thread.model_provider || "(missing)"} -> ${targetProvider}`;
+    groups.set(key, (groups.get(key) ?? 0) + 1);
+    mismatches.push({
+      thread,
+      provider: thread.model_provider,
+      dbProvider: thread.model_provider,
+      rolloutProvider: rolloutProvider ?? "(missing)",
+      targetProvider,
+      needsDb: Boolean(rolloutProvider),
+      needsRollout: !rolloutProvider
+    });
+  }
+  return {
+    mismatches,
+    groups: [...groups.entries()]
+      .map(([provider, count]) => ({ provider, count }))
+      .sort((left, right) => right.count - left.count || String(left.provider).localeCompare(String(right.provider)))
+  };
+}
+
 async function getStatus(home) {
   const db = openDb(home, { readOnly: true });
   let integrity = "unknown";
@@ -452,6 +492,7 @@ async function getStatus(home) {
   const providerSync = activeProvider
     ? await collectProviderTagMismatches(home, activeProvider)
     : { mismatches: [], groups: [] };
+  const providerRepair = await collectProviderConsistencyMismatches(home);
 
   return {
     codexHome: home,
@@ -468,6 +509,8 @@ async function getStatus(home) {
     activeProvider: activeProvider ?? null,
     providerSyncMismatchCount: providerSync.mismatches.length,
     providerSyncMismatchGroups: providerSync.groups,
+    providerRepairMismatchCount: providerRepair.mismatches.length,
+    providerRepairMismatchGroups: providerRepair.groups,
     missingRollout,
     missingDb,
     rolloutPathOutsideHome
@@ -1683,29 +1726,32 @@ async function fixReservedProviders(home, { toId = "openai-custom", execute }) {
   return { dryRun: false, toId, changes: allChanges, backupDir };
 }
 
-async function syncProviderTag(home, { toId, execute }) {
+async function syncProviderTag(home, { toId, execute, mode = "retag" }) {
   const text = await readTextIfPresent(configPath(home), "") ?? "";
   const target = (toId && String(toId).trim()) || summarizeConfig(text).modelProvider;
-  if (!target) {
+  const safeMode = mode === "repair" ? "repair" : "retag";
+  if (safeMode === "retag" && !target) {
     throw new Error("No target provider id; set model_provider in config.toml or pass --to <id>");
   }
-  const { mismatches, groups } = await collectProviderTagMismatches(home, target, { strictRolloutPaths: true });
+  const { mismatches, groups } = safeMode === "repair"
+    ? await collectProviderConsistencyMismatches(home, { strictRolloutPaths: true })
+    : await collectProviderTagMismatches(home, target, { strictRolloutPaths: true });
   const total = mismatches.length;
 
   if (!execute) {
-    return { dryRun: true, target, groups, total };
+    return { dryRun: true, mode: safeMode, target: safeMode === "retag" ? target : null, groups, total };
   }
   if (!total) {
-    return { dryRun: false, target, updated: 0, noOp: true };
+    return { dryRun: false, mode: safeMode, target: safeMode === "retag" ? target : null, updated: 0, noOp: true };
   }
 
   const targetThreads = mismatches.map((mismatch) => mismatch.thread);
   assertThreadRolloutsInsideHome(home, targetThreads);
-  const backupDir = await createBackup(home, `config-sync:${target}`, targetThreads);
+  const backupDir = await createBackup(home, safeMode === "repair" ? "config-sync:repair" : `config-sync:${target}`, targetThreads);
   try {
     const rolloutUpdates = [];
     for (const mismatch of mismatches.filter((item) => item.needsRollout)) {
-      const prepared = await prepareRolloutProviderUpdate(mismatch.thread.rollout_path, target);
+      const prepared = await prepareRolloutProviderUpdate(mismatch.thread.rollout_path, mismatch.targetProvider ?? target);
       if (!prepared.changed) {
         if (prepared.reason === "already-target") continue;
         throw new Error(`Cannot update rollout provider for ${mismatch.thread.id}: ${prepared.reason}`);
@@ -1718,9 +1764,17 @@ async function syncProviderTag(home, { toId, execute }) {
     try {
       db.exec("PRAGMA busy_timeout = 5000");
       db.exec("BEGIN IMMEDIATE");
-      const info = db.prepare("UPDATE threads SET model_provider = ? WHERE model_provider <> ?").run(target, target);
+      let changes = 0;
+      if (safeMode === "repair") {
+        const updateThread = db.prepare("UPDATE threads SET model_provider = ? WHERE id = ?");
+        for (const mismatch of mismatches.filter((item) => item.needsDb)) {
+          changes += Number(updateThread.run(mismatch.targetProvider, mismatch.thread.id).changes ?? 0);
+        }
+      } else {
+        changes = Number(db.prepare("UPDATE threads SET model_provider = ? WHERE model_provider <> ?").run(target, target).changes ?? 0);
+      }
       db.exec("COMMIT");
-      dbUpdated = Number(info.changes ?? 0);
+      dbUpdated = changes;
     } catch (error) {
       try {
         db.exec("ROLLBACK");
@@ -1737,7 +1791,8 @@ async function syncProviderTag(home, { toId, execute }) {
     }
     return {
       dryRun: false,
-      target,
+      mode: safeMode,
+      target: safeMode === "retag" ? target : null,
       updated: total,
       dbUpdated,
       rolloutUpdated: rolloutUpdates.length,

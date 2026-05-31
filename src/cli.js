@@ -260,7 +260,8 @@ function printConfigSyncResult(result, execute) {
   }
   printKeyValues([
     ["Mode", color(COLOR.yellow, "preview")],
-    ["Target provider", result.target],
+    ["Sync mode", result.mode === "repair" ? "repair mismatches" : "retag to current"],
+    ["Target provider", result.target ?? "-"],
     ["Chats to retag", result.total]
   ]);
   if (result.groups?.length) {
@@ -675,6 +676,7 @@ async function main() {
   if (command === "config-sync") {
     const result = await syncProviderTag(home, {
       toId: typeof flags.to === "string" ? flags.to : undefined,
+      mode: isTruthy(flags.repair) || flags.mode === "repair" ? "repair" : "retag",
       execute
     });
     asJson ? printJson(result) : printConfigSyncResult(result, execute);

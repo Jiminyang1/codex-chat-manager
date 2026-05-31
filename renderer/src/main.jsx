@@ -5,6 +5,7 @@ import {
   Check,
   ChevronRight,
   Folder,
+  Info,
   KeyRound,
   Plus,
   RefreshCw,
@@ -154,9 +155,10 @@ function App() {
     ?? visibleThreads[0]
     ?? null;
   const activeProvider = config?.modelProvider ?? "";
-  const mismatched = status?.activeProvider === activeProvider && Number.isFinite(status?.providerSyncMismatchCount)
+  const retagCount = status?.activeProvider === activeProvider && Number.isFinite(status?.providerSyncMismatchCount)
     ? status.providerSyncMismatchCount
     : providers.filter(([provider]) => provider !== activeProvider).reduce((sum, [, count]) => sum + count, 0);
+  const repairCount = Number.isFinite(status?.providerRepairMismatchCount) ? status.providerRepairMismatchCount : 0;
   const providerItems = useMemo(() => [
     {
       id: "official",
@@ -637,7 +639,7 @@ function App() {
               <ThreadDetail thread={selectedThread} selectedProject={selectedProject} onDeleteThread={() => setModal({ title: "Delete chat", body: `${selectedThread.title || "(untitled)"}\n${shortPath(selectedThread.cwd)}`, action: () => runMutation("thread:trash", { threadId: selectedThread.id }, "Chat moved to backup") })} onDeleteProject={() => selectedProject && setModal({ title: "Delete project", body: `${shortPath(selectedProject)}\nAll exact-cwd chats move into a restorable backup.`, action: () => runMutation("project:delete", { project: selectedProject }, "Project deleted") })} />
             )}
             {view === "providers" && (
-              <ProviderDetail item={selectedProviderItem} config={config} mismatched={mismatched} files={providerFiles} expandedFiles={expandedFiles} setExpandedFiles={setExpandedFiles} onUseOfficial={() => setModal({ title: "Switch to OpenAI Official", body: officialSwitchMessage(config?.officialAuthSnapshot), action: () => runMutation("provider:useOfficial", {}, "Switched to OpenAI Official") })} onUseProfile={(profile) => setModal({ title: `Switch to ${profile.label}`, body: profile.hasAuth ? "This writes config.toml and auth.json from the profile snapshot." : "This writes config.toml. auth.json is unchanged.", action: () => runMutation("profile:switch", { profileId: profile.id }, "Profile switched") })} onEdit={openProfileEditor} onDelete={(profile) => setModal({ title: "Delete profile", body: `Delete saved profile \"${profile.label}\"?`, action: () => runMutation("profile:delete", { id: profile.id }, "Profile deleted") })} onSync={() => setModal({ title: "Sync chats", body: `Retag ${mismatched} chat(s) to ${activeProvider}. Quit Codex Desktop first.`, action: () => runMutation("config:sync", {}, "Chats synced") })} />
+              <ProviderDetail item={selectedProviderItem} config={config} repairCount={repairCount} retagCount={retagCount} files={providerFiles} expandedFiles={expandedFiles} setExpandedFiles={setExpandedFiles} onUseOfficial={() => setModal({ title: "Switch to OpenAI Official", body: officialSwitchMessage(config?.officialAuthSnapshot), action: () => runMutation("provider:useOfficial", {}, "Switched to OpenAI Official") })} onUseProfile={(profile) => setModal({ title: `Switch to ${profile.label}`, body: profile.hasAuth ? "This writes config.toml and auth.json from the profile snapshot." : "This writes config.toml. auth.json is unchanged.", action: () => runMutation("profile:switch", { profileId: profile.id }, "Profile switched") })} onEdit={openProfileEditor} onDelete={(profile) => setModal({ title: "Delete profile", body: `Delete saved profile \"${profile.label}\"?`, action: () => runMutation("profile:delete", { id: profile.id }, "Profile deleted") })} onExplainSync={() => setModal({ title: "Sync modes", body: ["Repair mismatches updates only chats where SQLite and rollout metadata disagree. It keeps each chat on its original provider tag.", "", "Retag all changes every chat outside the active provider to the current provider id. This makes hidden chats visible here, but overwrites previous provider tags.", "", "Both modes create a restorable backup first."].join("\n"), confirmLabel: "Close", action: () => setModal(null) })} onRepair={() => setModal({ title: "Repair provider mismatches", body: `Repair ${repairCount} chat(s). This does not merge provider tags.`, action: () => runMutation("config:sync", { mode: "repair" }, "Provider mismatches repaired") })} onRetag={() => setModal({ title: "Retag all chats", body: `Retag ${retagCount} chat(s) to ${activeProvider}. Previous provider tags will be overwritten.`, action: () => runMutation("config:sync", { mode: "retag" }, "Chats retagged") })} />
             )}
             {view === "backups" && <div className="detail-empty"><ArchiveRestore size={28} /><p>Select a backup to restore it.</p></div>}
             {view === "settings" && <StatusPanel status={status} />}
@@ -670,7 +672,8 @@ function ThreadDetail({ thread, selectedProject, onDeleteThread, onDeleteProject
 function ProviderDetail({
   item,
   config,
-  mismatched,
+  repairCount,
+  retagCount,
   files,
   expandedFiles,
   setExpandedFiles,
@@ -678,7 +681,9 @@ function ProviderDetail({
   onUseProfile,
   onEdit,
   onDelete,
-  onSync
+  onExplainSync,
+  onRepair,
+  onRetag
 }) {
   if (!item) {
     return <div className="detail-empty"><KeyRound size={28} /><p>Select a provider.</p></div>;
@@ -719,7 +724,16 @@ function ProviderDetail({
         )}
       </div>
       <ProviderFiles files={files} expandedFiles={expandedFiles} setExpandedFiles={setExpandedFiles} isOfficial={isOfficial} />
-      <button className="primary wide" onClick={onSync} disabled={!mismatched} type="button"><Shield size={15} /> Sync hidden chats</button>
+      <div className="sync-panel">
+        <div className="sync-title">
+          <span>Provider metadata</span>
+          <button className="help-button" onClick={onExplainSync} title="Sync modes" type="button"><Info size={14} /></button>
+        </div>
+        <div className="sync-actions">
+          <button onClick={onRepair} disabled={!repairCount} type="button"><Shield size={15} /> Repair mismatches</button>
+          <button className="primary" onClick={onRetag} disabled={!retagCount} type="button"><Shield size={15} /> Retag all chats</button>
+        </div>
+      </div>
     </div>
   );
 }
