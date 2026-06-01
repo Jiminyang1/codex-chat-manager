@@ -61,6 +61,30 @@ function backupRestoreMessage(backup: BackupSummary | null | undefined, scope: B
   return `${backup?.title || "Backup"} · ${created}`;
 }
 
+function backupBulkDeleteMessage(backups: BackupSummary[]): string {
+  const counts = backups.reduce((acc, backup) => {
+    const category = backup.category === "chats" || backup.category === "providers" || backup.category === "sync" ? backup.category : "providers";
+    acc[category] = (acc[category] ?? 0) + 1;
+    return acc;
+  }, {} as Record<string, number>);
+  const scopeLine = [
+    counts.chats ? `${counts.chats} chat/project` : "",
+    counts.providers ? `${counts.providers} config` : "",
+    counts.sync ? `${counts.sync} sync` : ""
+  ].filter(Boolean).join(", ");
+  const preview = backups.slice(0, 6).map((backup) => `- ${backupTitle(backup)} · ${formatBackupDate(backup.createdAt)}`);
+  if (backups.length > preview.length) {
+    preview.push(`- ${backups.length - preview.length} more`);
+  }
+  return [
+    `Delete ${backups.length} selected backup snapshot${backups.length === 1 ? "" : "s"}${scopeLine ? ` (${scopeLine})` : ""}.`,
+    "",
+    "This permanently removes the selected snapshots. Restoring from them will no longer be possible.",
+    "",
+    ...preview
+  ].join("\n");
+}
+
 function backupTitle(backup: BackupSummary | null | undefined): string {
   if (backup?.category === "chats") {
     const chats = backup.chatSummaries ?? [];
@@ -157,6 +181,7 @@ function backupSubtitle(backup: BackupSummary | null | undefined): string {
 
 export {
   backupChatLocation,
+  backupBulkDeleteMessage,
   backupFilesSummary,
   backupGroupMeta,
   backupKindLabel,

@@ -12,6 +12,7 @@ export {
   resolveProjectRef,
   resolveBackupRef,
   trashThreads,
+  deleteBackup,
   deleteProject,
   restoreBackup
 } from "./state.js";

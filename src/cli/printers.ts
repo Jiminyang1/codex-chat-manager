@@ -252,6 +252,20 @@ function printBackups(backups: BackupSummary[]): void {
   }
 }
 
+function printBackupDeleteResult(result: JsonRecord, execute: boolean): void {
+  printTitle(execute ? "Deleted Backup" : "Delete Backup Preview");
+  printKeyValues([
+    [execute ? "Deleted" : "Would delete", compactPath(result.backupDir)],
+    ["Category", result.backup?.category ?? "-"],
+    ["Created", formatIsoDate(result.backup?.createdAt)],
+    ["Chats", result.backup?.threadIds?.length ?? 0],
+    ["Reason", result.backup?.reason || result.backup?.title || "backup"]
+  ]);
+  if (!execute) {
+    printNext(`codex-chat-manager delete-backup ${shellQuote(result.backupDir)} --yes`);
+  }
+}
+
 function printMutationResult({ title, result, execute, previewCommand, executeCommand, emptyMessage }: MutationPrintOptions): void {
   printTitle(title);
   if (execute) {
@@ -319,6 +333,7 @@ function printRestoreResult(result: JsonRecord, execute: boolean): void {
 
 export {
   printBackups,
+  printBackupDeleteResult,
   printConfigOverview,
   printConfigSyncResult,
   printJson,

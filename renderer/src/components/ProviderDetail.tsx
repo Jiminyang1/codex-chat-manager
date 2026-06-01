@@ -7,6 +7,7 @@ type ProviderItem = JsonRecord & {
   title: string;
   badge?: string;
   active?: boolean;
+  current?: boolean;
   profile?: ProviderProfile;
   summary?: JsonRecord | null;
 };
@@ -38,6 +39,7 @@ function ProviderDetail({
   }
 
   const isOfficial = item.id === "official";
+  const isCurrent = item.current === true;
   const profile = item.profile;
   const summary = item.summary ?? {};
   const officialSnapshot = config?.officialAuthSnapshot;
@@ -55,23 +57,26 @@ function ProviderDetail({
         <span>Provider</span><strong>{summary.provider ?? "-"}</strong>
         <span>Base URL</span><strong>{summary.baseUrl ?? "-"}</strong>
         <span>Model</span><strong>{summary.model ?? config?.model ?? "-"}</strong>
-        <span>Auth</span><strong>{isOfficial ? `OpenAI login (${config?.auth?.mode ?? "?"})` : profile?.hasAuth ? "profile auth snapshot" : "bearer token / unchanged auth"}</strong>
+        <span>Auth</span><strong>{isOfficial ? `OpenAI login (${config?.auth?.mode ?? "?"})` : isCurrent ? config?.auth?.exists ? "current auth.json" : "current config only" : profile?.hasAuth ? "profile auth snapshot" : "bearer token / unchanged auth"}</strong>
         {isOfficial && <><span>Snapshot</span><strong>{snapshotLabel}</strong></>}
+        {isCurrent && <><span>Source</span><strong>detected, not saved as a profile</strong></>}
         <span>Active config</span><strong>{config?.modelProvider ?? "-"}</strong>
         <span>Bearer</span><strong>{config?.bearer?.present ? config.bearer.masked : "none"}</strong>
       </div>
-      <div className="actions">
-        {isOfficial ? (
-          <button className="primary" onClick={onUseOfficial} disabled={item.active} type="button">Use</button>
-        ) : (
-          <>
-            <button className="primary" onClick={() => profile && onUseProfile(profile)} disabled={item.active || !profile} type="button">Use</button>
-            <button onClick={() => profile && onEdit(profile)} disabled={!profile} type="button">Edit</button>
-            <button className="danger-text" onClick={() => profile && onDelete(profile)} disabled={!profile} type="button">Delete</button>
-          </>
-        )}
-      </div>
-      <ProviderFiles files={files} expandedFiles={expandedFiles} setExpandedFiles={setExpandedFiles} isOfficial={isOfficial} />
+      {!isCurrent && (
+        <div className="actions">
+          {isOfficial ? (
+            <button className="primary" onClick={onUseOfficial} disabled={item.active} type="button">Use</button>
+          ) : (
+            <>
+              <button className="primary" onClick={() => profile && onUseProfile(profile)} disabled={item.active || !profile} type="button">Use</button>
+              <button onClick={() => profile && onEdit(profile)} disabled={!profile} type="button">Edit</button>
+              <button className="danger-text" onClick={() => profile && onDelete(profile)} disabled={!profile} type="button">Delete</button>
+            </>
+          )}
+        </div>
+      )}
+      <ProviderFiles files={files} expandedFiles={expandedFiles} setExpandedFiles={setExpandedFiles} isOfficial={isOfficial} isCurrent={isCurrent} />
     </div>
   );
 }
@@ -81,6 +86,7 @@ function ProviderFiles({ files, expandedFiles, setExpandedFiles, isOfficial }: {
   expandedFiles: ExpandedFiles;
   setExpandedFiles: Dispatch<SetStateAction<ExpandedFiles>>;
   isOfficial: boolean;
+  isCurrent?: boolean;
 }) {
   function toggle(file: keyof ExpandedFiles) {
     setExpandedFiles({ ...expandedFiles, [file]: !expandedFiles[file] });
@@ -106,6 +112,9 @@ function ProviderFiles({ files, expandedFiles, setExpandedFiles, isOfficial }: {
       )}
       {isOfficial && files?.source === "profile" && (
         <div className="file-empty">Using {files.autoManaged ? "auto-saved" : "saved"} official profile snapshot: {files.label || "profile"}</div>
+      )}
+      {files?.source === "current" && (
+        <div className="file-empty">Detected from current Codex files. This provider was not added in Chat Manager and is not saved as a profile.</div>
       )}
       <FileDisclosure title="config.toml" value={files?.config ?? ""} expanded={expandedFiles.config} onToggle={() => toggle("config")} />
       <FileDisclosure title="auth.json" value={files?.auth ?? ""} expanded={expandedFiles.auth} onToggle={() => toggle("auth")} />

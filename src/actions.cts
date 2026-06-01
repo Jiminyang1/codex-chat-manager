@@ -51,6 +51,9 @@ export const actionPayloadSchemas = {
     backupDir: z.string().min(1, "backupDir is required"),
     scope: backupScopeSchema.optional()
   }),
+  "backup:delete": mutationPayload.extend({
+    backupDir: z.string().min(1, "backupDir is required")
+  }),
   "config:get": basePayload,
   "config:file:get": basePayload.extend({
     file: fileNameSchema.optional()
@@ -113,6 +116,7 @@ export interface ActionResultMap {
   "thread:trash": MutationResult;
   "project:delete": MutationResult;
   "backup:restore": MutationResult;
+  "backup:delete": MutationResult;
   "config:get": ConfigOverview;
   "config:file:get": { file: ConfigFileName; path: string; exists: boolean; raw: string };
   "config:file:write": MutationResult;

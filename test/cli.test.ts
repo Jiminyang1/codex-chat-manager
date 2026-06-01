@@ -223,6 +223,38 @@ test("backups command lists backups and restore supports backup numbers", async 
   assert.equal(await exists(fixture.rolloutPath), true);
 });
 
+test("delete-backup removes backup snapshots and supports backup numbers", async () => {
+  const fixture = await makeFixture();
+  const deleted = await runCli(["delete-project", fixture.project, "--codex-home", fixture.home, "--yes", "--json"]);
+  const deleteResult = JSON.parse(deleted.stdout);
+
+  const preview = await invokeAction("backup:delete", {
+    codexHome: fixture.home,
+    backupDir: deleteResult.backupDir
+  });
+  assert.equal(preview.dryRun, true);
+  assert.equal(preview.backupDir, deleteResult.backupDir);
+  assert.equal(await exists(deleteResult.backupDir), true);
+
+  const removed = JSON.parse((await runCli(["delete-backup", "#1", "--codex-home", fixture.home, "--yes", "--json"])).stdout);
+  assert.equal(removed.dryRun, false);
+  assert.equal(removed.deleted, true);
+  assert.equal(removed.backupDir, deleteResult.backupDir);
+  assert.equal(await exists(deleteResult.backupDir), false);
+
+  const backups = JSON.parse((await runCli(["backups", "--codex-home", fixture.home, "--json"])).stdout) as AnyRecord[];
+  assert.equal(backups.length, 0);
+
+  await assert.rejects(
+    invokeAction("backup:delete", {
+      codexHome: fixture.home,
+      backupDir: path.join(fixture.home, "state_5.sqlite"),
+      confirmed: true
+    }),
+    /Refusing to delete backup outside/
+  );
+});
+
 test("backup summaries keep unsaved Codex cwd chats projectless", async () => {
   const fixture = await makeFixture();
   const generatedCwd = path.join(fixture.home, "Documents", "Codex", "2026-05-20", "2-kla");
@@ -567,21 +599,53 @@ test("profile round-trip: save → switch away → switch back restores both fil
 });
 
 test("config-fix renames a reserved [model_providers.openai] block and guards raw writes", async () => {
-  const reserved = 'model_provider = "openai"\nmodel = "gpt-5.5"\n\n[model_providers.openai]\nname = "openai"\nbase_url = "https://api.axis.fan"\nrequires_openai_auth = false\n';
+  const reserved = 'model_provider = "openai"\nmodel = "gpt-5.5"\n\n[model_providers.openai]\nname = "OpenAI"\nbase_url = "https://api.axis.fan"\nrequires_openai_auth = false\n';
   const home = await makeConfigHome(reserved);
 
-  const result = JSON.parse((await runCli(["config-fix", "--codex-home", home, "--json", "--yes"])).stdout);
+  const result = JSON.parse((await runCli(["config-fix", "--codex-home", home, "--to", "axis", "--json", "--yes"])).stdout);
   assert.ok(result.backupDir);
   const after = await fs.readFile(path.join(home, "config.toml"), "utf8");
-  assert.match(after, /\[model_providers\.openai-custom\]/);
+  assert.match(after, /\[model_providers\.axis\]/);
   assert.doesNotMatch(after, /\[model_providers\.openai\]/);
-  assert.match(after, /model_provider = "openai-custom"/);
+  assert.match(after, /model_provider = "axis"/);
+  assert.match(after, /name = "OpenAI"/);
 
   // Raw write guard refuses to re-introduce a reserved block.
   const badB64 = Buffer.from("[model_providers.openai]\n", "utf8").toString("base64");
   await assert.rejects(
     runCli(["config-file-write", "--codex-home", home, "--file", "config", "--content-b64", badB64, "--yes"]),
     /reserved built-in/
+  );
+});
+
+test("provider:create aligns the only provider block to model_provider", async () => {
+  const home = await makeConfigHome();
+  const result = await invokeAction("provider:create", {
+    codexHome: home,
+    label: "Fenno",
+    configText: 'model_provider = "Fenno"\nmodel = "gpt-5.4"\n\n[model_providers.OpenAI]\nname = "OpenAI"\nbase_url = "https://api.fenno.ai"\nwire_api = "responses"\nrequires_openai_auth = true\n',
+    authText: '{ "OPENAI_API_KEY": "sk-fenno" }\n',
+    switch: false
+  });
+
+  assert.equal(result.profile.providerId, "Fenno");
+  const savedConfig = await fs.readFile(path.join(home, "chat-manager-profiles", `${result.profile.id}.toml`), "utf8");
+  assert.match(savedConfig, /model_provider = "Fenno"/);
+  assert.match(savedConfig, /\[model_providers\.Fenno\]/);
+  assert.doesNotMatch(savedConfig, /\[model_providers\.OpenAI\]/);
+});
+
+test("custom provider config still rejects exact built-in provider ids", async () => {
+  const home = await makeConfigHome();
+  await assert.rejects(
+    invokeAction("provider:create", {
+      codexHome: home,
+      label: "Local",
+      configText: 'model_provider = "ollama"\nmodel = "gpt-oss"\n\n[model_providers.ollama]\nname = "Ollama"\nbase_url = "http://localhost:11434/v1"\n',
+      authText: "{}\n",
+      switch: false
+    }),
+    /reserved built-in provider id/
   );
 });
 
@@ -851,6 +915,19 @@ test("config:get shows an existing profile active by provider id", async () => {
   assert.equal(await exists(path.join(home, "chat-manager-profiles", "current-provider-openai-custom.toml")), false);
 });
 
+test("config:get does not mark a stale profile active after external config edits", async () => {
+  const home = await makeConfigHome();
+  const saved = JSON.parse((await runCli(["config-save-profile", "axis", "--codex-home", home, "--json"])).stdout);
+  await fs.writeFile(path.join(home, "config.toml"), SAMPLE_CONFIG.replace('model = "gpt-5.5"', 'model = "gpt-5.4"'));
+
+  const overview = await invokeAction("config:get", { codexHome: home });
+
+  const matching = overview.profiles.find((profile) => profile.id === saved.profile.id);
+  assert.equal(matching?.providerId, "openai-custom");
+  assert.equal(matching?.active, false);
+  assert.equal(overview.modelProvider, "openai-custom");
+});
+
 test("config:get removes old auto-detected third-party profiles", async () => {
   const home = await makeConfigHome();
   const profileDir = path.join(home, "chat-manager-profiles");
@@ -1065,6 +1142,34 @@ test("profile file API rejects invalid third-party provider configs", async () =
     invokeAction("profile:switch", { codexHome: home, profileId: created.profile.id, confirmed: true }),
     /must set model_provider/
   );
+});
+
+test("profile file API deletes auth snapshot when auth content is cleared", async () => {
+  const home = await makeConfigHome();
+  const created = await invokeAction("provider:create", {
+    codexHome: home,
+    label: "Axis",
+    configText: 'model_provider = "axis"\nmodel = "gpt-5.5"\n\n[model_providers.axis]\nname = "axis"\nbase_url = "https://api.axis.fan"\nwire_api = "responses"\n',
+    authText: '{ "OPENAI_API_KEY": "sk-axis" }\n',
+    switch: false
+  });
+
+  const authPath = path.join(home, "chat-manager-profiles", `${created.profile.id}.auth.json`);
+  assert.equal(await exists(authPath), true);
+
+  const result = await invokeAction("profile:file:write", {
+    codexHome: home,
+    profileId: created.profile.id,
+    file: "auth",
+    content: "",
+    confirmed: true
+  });
+
+  assert.equal(result.deleted, true);
+  assert.equal(await exists(authPath), false);
+  const overview = await invokeAction("config:get", { codexHome: home });
+  const profile = overview.profiles.find((item) => item.id === created.profile.id);
+  assert.equal(profile?.hasAuth, false);
 });
 
 test("app API and preload action whitelist reject unknown actions", async () => {

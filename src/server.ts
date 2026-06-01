@@ -132,6 +132,7 @@ async function handleLegacyApi(req: http.IncomingMessage, res: http.ServerRespon
     "/api/trash-thread": "thread:trash",
     "/api/delete-project": "project:delete",
     "/api/restore": "backup:restore",
+    "/api/delete-backup": "backup:delete",
     "/api/profile/switch": "profile:switch",
     "/api/profile/file": "profile:file:write",
     "/api/provider/create": "provider:create",

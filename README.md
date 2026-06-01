@@ -103,11 +103,12 @@ codex-chat-manager delete-project '#3' --yes
 codex-chat-manager trash-provider <provider> --yes
 codex-chat-manager backups
 codex-chat-manager restore '#1' --yes
+codex-chat-manager delete-backup '#1' --yes
 ```
 
 `delete-project` always removes the saved project root references and trashes every chat whose `cwd` exactly matches that project path.
 
-CLI output is formatted for humans by default. Use `--json` for scripts. Project and backup tables include `#` references, so you can run commands like `delete-project '#3'` or `restore '#1'`. Chat tables show a short `Ref`; `delete-chat` accepts that short id if it uniquely identifies one chat.
+CLI output is formatted for humans by default. Use `--json` for scripts. Project and backup tables include `#` references, so you can run commands like `delete-project '#3'`, `restore '#1'`, or `delete-backup '#1'`. Chat tables show a short `Ref`; `delete-chat` accepts that short id if it uniquely identifies one chat.
 
 ## Important Limits
 

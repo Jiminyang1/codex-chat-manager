@@ -21,6 +21,7 @@ ${color(COLOR.cyan, "Delete, safely")}
   codex-chat-manager delete-chat <chat-id-or-prefix> --yes
   codex-chat-manager delete-project '<path-or-#number>'
   codex-chat-manager delete-project '<path-or-#number>' --yes
+  codex-chat-manager delete-backup '<backup-dir-or-#number>' --yes
 
 ${color(COLOR.cyan, "Commands")}
   status
@@ -31,6 +32,7 @@ ${color(COLOR.cyan, "Commands")}
   trash-provider | delete-provider <provider-id>
   backups
   restore <backup-dir-or-#number> [--scope chats|config|metadata]
+  delete-backup | rm-backup <backup-dir-or-#number>
   web [--port 8765]
 
 ${color(COLOR.cyan, "Config / provider switching")}
@@ -64,6 +66,8 @@ function normalizeCommand(command: string | undefined): string | undefined {
     "delete-provider": "trash-provider",
     "rm-provider": "trash-provider",
     "rm-project": "delete-project",
+    "rm-backup": "delete-backup",
+    "remove-backup": "delete-backup",
     serve: "web",
     ui: "web",
     config: "config-show",

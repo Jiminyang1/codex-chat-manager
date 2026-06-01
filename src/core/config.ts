@@ -15,10 +15,9 @@ import {
 } from "./state.js";
 import { readTextIfPresent, writeTextIfChanged } from "./io.js";
 import {
-  BUILTIN_PROVIDER_IDS,
+  alignSingleProviderBlockToModelProvider,
   assertCustomProviderConfig,
   assertNoReservedProviderBlock,
-  escapeRegex,
   findReservedProviderBlocks,
   providerIdFromConfigText,
   providerKind,
@@ -382,6 +381,18 @@ async function writeProfileFile(home: string, profileId: string, file: ConfigFil
   const entry = await requireProfile(home, profileId);
   const safeFile = file === "auth" ? "auth" : "config";
   if (typeof content !== "string") throw new Error("content is required");
+  const filePath = path.join(profileDir(home), `${entry.id}.${safeFile === "auth" ? "auth.json" : "toml"}`);
+  if (safeFile === "auth" && !content.trim()) {
+    if (!execute) {
+      return { dryRun: true, file: safeFile, path: filePath, bytes: 0, willDelete: true };
+    }
+    await fs.rm(filePath, { force: true });
+    const profiles = await readProfileIndex(home);
+    await writeProfileIndex(home, profiles.map((profile) => (
+      profile.id === entry.id ? { ...profile, hasAuth: false } : profile
+    )));
+    return { dryRun: false, file: safeFile, path: filePath, saved: false, deleted: true };
+  }
   if (safeFile === "auth") {
     try {
       JSON.parse(content);
@@ -394,7 +405,6 @@ async function writeProfileFile(home: string, profileId: string, file: ConfigFil
       assertCustomProviderConfig(content);
     }
   }
-  const filePath = path.join(profileDir(home), `${entry.id}.${safeFile === "auth" ? "auth.json" : "toml"}`);
   if (!execute) {
     return { dryRun: true, file: safeFile, path: filePath, bytes: Buffer.byteLength(content, "utf8") };
   }
@@ -428,22 +438,15 @@ async function listProfiles(home: string, currentText: string): Promise<Provider
   const entries = await readProfileIndex(home);
   const currentProviderId = summarizeConfig(currentText).modelProvider;
   const visible: Array<{ key: string; entry: ProfileEntry; providerId: string | null }> = [];
-  const seenProviderIds = new Set<string>();
   for (const entry of entries) {
     if (entry.autoManaged === true && entry.id === OFFICIAL_PROFILE_ID) continue;
     const providerId = await profileProviderId(home, entry);
     if (providerId) {
-      const key = `${entry.kind ?? "custom"}:${providerId}`;
+      const key = `${entry.kind ?? "custom"}:${providerId}:${entry.id}`;
       const existingIndex = visible.findIndex((profile) => profile.key === key);
       if (existingIndex !== -1) {
-        const previous = visible[existingIndex].entry;
-        if (previous.autoDetected === true && entry.autoDetected !== true) {
-          visible[existingIndex] = { key, entry, providerId };
-        }
         continue;
       }
-      if (entry.autoDetected === true && seenProviderIds.has(providerId)) continue;
-      seenProviderIds.add(providerId);
       visible.push({ key, entry, providerId });
     } else {
       visible.push({ key: `missing:${entry.id}`, entry, providerId: null });
@@ -453,6 +456,7 @@ async function listProfiles(home: string, currentText: string): Promise<Provider
   for (const { entry, providerId } of visible) {
     const file = path.join(profileDir(home), `${entry.id}.toml`);
     const snapshot = await readTextIfPresent(file, null);
+    const configMatchesCurrent = snapshot !== null && snapshot === currentText;
     profiles.push({
       id: entry.id,
       label: entry.label ?? entry.id,
@@ -464,7 +468,7 @@ async function listProfiles(home: string, currentText: string): Promise<Provider
       providerId,
       missing: snapshot === null,
       hasAuth: entry.hasAuth === true,
-      active: providerId !== null && providerId === currentProviderId
+      active: providerId !== null && providerId === currentProviderId && configMatchesCurrent
     });
   }
   return profiles.sort((left, right) => String(right.createdAt).localeCompare(String(left.createdAt)));
@@ -533,9 +537,10 @@ async function createProvider(home: string, {
   if (typeof configText !== "string" || !configText.trim()) {
     throw new Error("configText is required");
   }
-  assertNoReservedProviderBlock(configText);
-  providerIdFromConfigText(configText);
-  const normalizedConfigText = configText.endsWith("\n") ? configText : `${configText}\n`;
+  const alignedConfigText = alignSingleProviderBlockToModelProvider(configText).text;
+  assertNoReservedProviderBlock(alignedConfigText);
+  providerIdFromConfigText(alignedConfigText);
+  const normalizedConfigText = alignedConfigText.endsWith("\n") ? alignedConfigText : `${alignedConfigText}\n`;
 
   let normalizedAuthText = null;
   if (typeof authText === "string" && authText.trim()) {
@@ -551,7 +556,7 @@ async function createProvider(home: string, {
     note: "",
     kind: "third-party",
     configText: normalizedConfigText,
-    authText: normalizedAuthText
+    authText: normalizedAuthText,
   });
   if (shouldSwitch) {
     await switchProfile(home, result.profile.id, { execute: true });
@@ -686,13 +691,10 @@ async function fixReservedProviders(home: string, { toId = "openai-custom", exec
   const text = await readTextIfPresent(configPath(home), "") ?? "";
   let next = text;
   const allChanges = [];
-  for (const id of BUILTIN_PROVIDER_IDS) {
-    const re = new RegExp(`^\\s*\\[model_providers\\.(?:"${escapeRegex(id)}"|${escapeRegex(id)})\\]`, "m");
-    if (re.test(next)) {
-      const result = renameProviderInText(next, id, toId);
-      next = result.text;
-      allChanges.push(...result.changes);
-    }
+  for (const id of findReservedProviderBlocks(next)) {
+    const result = renameProviderInText(next, id, toId);
+    next = result.text;
+    allChanges.push(...result.changes);
   }
   if (!allChanges.length) {
     return { dryRun: !execute, noOp: true, changes: [] };

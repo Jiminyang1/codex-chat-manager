@@ -1,6 +1,7 @@
 import type { ConfigSummary, ProviderBlock, ProviderKind } from "../types.js";
 
-const BUILTIN_PROVIDER_IDS = new Set<string>(["openai"]);
+const OPENAI_PROVIDER_ID = "openai";
+const BUILTIN_PROVIDER_IDS = new Set<string>([OPENAI_PROVIDER_ID, "ollama", "lmstudio"]);
 
 type TomlScalar = string | number | boolean;
 type Change = { scope: string; key: string; before: string; after: string };
@@ -47,6 +48,10 @@ function providerKeyFromHeader(header: string): string | null {
   let key = match[1].trim();
   if (key.startsWith('"') && key.endsWith('"')) key = key.slice(1, -1);
   return key;
+}
+
+function normalizedProviderId(id: string): string {
+  return id.trim();
 }
 
 function topLevelRange(lines: string[]): [number, number] {
@@ -161,30 +166,51 @@ function summarizeConfig(text: string): ConfigSummary {
 function providerKind(provider: ProviderBlock | null, modelProvider: string | null): ProviderKind {
   // Any explicit [model_providers.<id>] block is a custom provider, even if it reuses a built-in id.
   if (provider) return "third-party";
-  // No custom block: a built-in id (e.g. openai) means the official, auth-based provider.
-  if (modelProvider && BUILTIN_PROVIDER_IDS.has(modelProvider)) return "official";
+  // No custom block: the built-in OpenAI id means the official, auth-based provider.
+  if (modelProvider === OPENAI_PROVIDER_ID) return "official";
   return "unknown";
 }
 
 function isReservedProviderId(id: string): boolean {
-  return BUILTIN_PROVIDER_IDS.has(id);
+  return BUILTIN_PROVIDER_IDS.has(normalizedProviderId(id));
 }
 
 function findReservedProviderBlocks(text: string): string[] {
   const found: string[] = [];
-  for (const id of BUILTIN_PROVIDER_IDS) {
-    const re = new RegExp(`^\\s*\\[model_providers\\.(?:"${escapeRegex(id)}"|${escapeRegex(id)})\\]`, "m");
-    if (re.test(text)) found.push(id);
+  const lines = text.split("\n");
+  for (const line of lines) {
+    const header = tableHeaderName(line);
+    if (!header) continue;
+    const key = providerKeyFromHeader(header);
+    if (key && isReservedProviderId(key) && !found.includes(key)) {
+      found.push(key);
+    }
   }
   return found;
 }
 
+function providerBlockIds(text: string): string[] {
+  const ids: string[] = [];
+  for (const line of text.split("\n")) {
+    const header = tableHeaderName(line);
+    if (!header) continue;
+    const key = providerKeyFromHeader(header);
+    if (key && !ids.includes(key)) ids.push(key);
+  }
+  return ids;
+}
+
+function alignSingleProviderBlockToModelProvider(text: string): { text: string; changes: Change[] } {
+  const providerId = summarizeConfig(text).configuredModelProvider?.toString().trim();
+  if (!providerId) return { text, changes: [] };
+  const ids = providerBlockIds(text);
+  if (ids.includes(providerId) || ids.length !== 1) return { text, changes: [] };
+  return renameProviderInText(text, ids[0], providerId);
+}
+
 function assertNoReservedProviderBlock(text: string): void {
-  for (const id of BUILTIN_PROVIDER_IDS) {
-    const re = new RegExp(`^\\s*\\[model_providers\\.(?:"${escapeRegex(id)}"|${escapeRegex(id)})\\]`, "m");
-    if (re.test(text)) {
-      throw new Error(`config.toml defines [model_providers.${id}], but "${id}" is a reserved built-in provider that cannot be overridden. Rename it to a custom id.`);
-    }
+  for (const id of findReservedProviderBlocks(text)) {
+    throw new Error(`config.toml defines [model_providers.${id}], but "${id}" is a reserved built-in provider id that cannot be overridden. Rename it to a custom id.`);
   }
 }
 
@@ -198,7 +224,7 @@ function providerIdFromConfigText(text: string): string {
     throw new Error("model_provider may only contain letters, numbers, dot, underscore, and hyphen");
   }
   if (isReservedProviderId(providerId)) {
-    throw new Error(`"${providerId}" is a reserved built-in provider. Use a custom id like "openai-custom".`);
+    throw new Error(`"${providerId}" is a reserved built-in provider id. Use a custom id like "axis" or "openai-custom".`);
   }
   if (!summary.provider) {
     throw new Error(`config.toml must define [model_providers.${providerId}].`);
@@ -218,14 +244,6 @@ function renameProviderInText(text: string, fromId: string, toId: string): { tex
     if (header && providerKeyFromHeader(header) === fromId) {
       lines[i] = lines[i].replace(/\[model_providers\..*\]/, `[model_providers.${toId}]`);
       changes.push({ scope: "block", key: "header", before: fromId, after: toId });
-      // Rename the block's name field if it echoed the old id.
-      let end = lines.length;
-      for (let j = i + 1; j < lines.length; j += 1) {
-        if (isTableHeader(lines[j])) { end = j; break; }
-      }
-      if (readScalarInRange(lines, i + 1, end, "name") === fromId) {
-        setScalarInRange(lines, i + 1, end, "name", toId, i + 1);
-      }
     }
   }
   const [ts, te] = topLevelRange(lines);
@@ -238,6 +256,8 @@ function renameProviderInText(text: string, fromId: string, toId: string): { tex
 
 export {
   BUILTIN_PROVIDER_IDS,
+  OPENAI_PROVIDER_ID,
+  alignSingleProviderBlockToModelProvider,
   assertCustomProviderConfig,
   assertNoReservedProviderBlock,
   escapeRegex,

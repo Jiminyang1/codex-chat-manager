@@ -2,6 +2,7 @@
 
 import {
   codexHome,
+  deleteBackup,
   deleteProfile,
   deleteProject,
   fixReservedProviders,
@@ -28,6 +29,7 @@ import { normalizeCommand, parseArgs, usage } from "./cli/commands.js";
 import { COLOR, color, compactPath, printKeyValues, shellQuote, shortId } from "./cli/format.js";
 import {
   printBackups,
+  printBackupDeleteResult,
   printConfigOverview,
   printConfigSyncResult,
   printJson,
@@ -140,6 +142,14 @@ async function main() {
       : undefined;
     const result = await restoreBackup(home, backupDir, execute, scope);
     asJson ? printJson(result) : printRestoreResult(result, execute);
+    return;
+  }
+
+  if (command === "delete-backup") {
+    const backupDir = await resolveBackupRef(home, positionals[1] ?? flags.backup);
+    if (!backupDir) throw new Error("delete-backup requires a backup directory or #number");
+    const result = await deleteBackup(home, backupDir, { execute });
+    asJson ? printJson(result) : printBackupDeleteResult(result, execute);
     return;
   }
 

@@ -206,6 +206,90 @@ h1, h2, h3, p { margin: 0; }
 .pane-head h1.title-line { display: flex; align-items: center; gap: 6px; }
 .pane-head p { color: var(--muted); margin-top: 3px; font-size: 12px; font-weight: 400; line-height: 1.25; }
 .pane-actions { flex: 0 0 auto; }
+.provider-pane-head { align-items: flex-start; }
+.provider-active {
+  margin-top: 6px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  min-height: 24px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--inset);
+  padding: 2px 7px;
+}
+.provider-active span { color: var(--muted); font-size: 10px; font-weight: 700; text-transform: uppercase; }
+.provider-active strong { min-width: 0; max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; font-weight: 650; }
+.provider-active em { color: var(--warn); font-size: 11px; font-style: normal; font-weight: 600; white-space: nowrap; }
+.backup-pane-head { align-items: flex-start; }
+.backup-select-tools {
+  min-height: 32px;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--inset);
+  padding: 3px;
+}
+.backup-select-tools.has-selection {
+  border-color: var(--line-strong);
+  background: var(--chip-bg);
+}
+.backup-select-all {
+  min-height: 24px;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  border-radius: 6px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 600;
+  padding: 0 7px;
+  white-space: nowrap;
+}
+.backup-select-all:hover { background: var(--hover); color: var(--text); }
+.backup-select-all input,
+.check-cell input {
+  appearance: none;
+  width: 15px;
+  height: 15px;
+  border: 1px solid var(--line-strong);
+  border-radius: 4px;
+  background: var(--panel-2);
+  accent-color: var(--accent);
+  flex: 0 0 auto;
+}
+.backup-select-all input:checked,
+.check-cell input:checked {
+  border-color: var(--accent);
+  background: var(--accent);
+  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 16 16' xmlns='http://www.w3.org/2000/svg'%3E%3Cpath d='M4 8.2 6.8 11 12 5' fill='none' stroke='white' stroke-width='2.1' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+  background-position: center;
+  background-repeat: no-repeat;
+  background-size: 13px 13px;
+}
+.backup-select-all input:disabled {
+  opacity: .45;
+}
+.selection-pill {
+  min-height: 24px;
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid var(--accent-border);
+  border-radius: 999px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  padding: 0 8px;
+  font-size: 11px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+.backup-delete-action {
+  min-height: 24px;
+  border-radius: 6px;
+  padding: 0 8px;
+}
 .thread-state-control button { min-width: 70px; padding: 0 10px; white-space: nowrap; }
 .rows { display: grid; gap: 4px; padding: 0 10px 14px; }
 .row {
@@ -224,6 +308,45 @@ h1, h2, h3, p { margin: 0; }
 .row svg { flex: 0 0 auto; }
 .row:hover { background: var(--hover); }
 .row.selected { background: var(--accent-soft); border-color: var(--accent-border); }
+.provider-row.detected { background: var(--inset); border-color: var(--line); }
+.provider-row.detected.selected { background: var(--accent-soft); border-color: var(--accent-border); }
+.backup-select-row {
+  padding: 0;
+  gap: 0;
+  overflow: hidden;
+}
+.backup-select-row.selected {
+  background: color-mix(in srgb, var(--accent-soft) 62%, transparent);
+  border-color: var(--accent-border);
+}
+.backup-select-row.checked {
+  border-color: var(--accent-border);
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+.backup-select-row .row-content {
+  min-height: 44px;
+  flex: 1 1 auto;
+  min-width: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  padding: 7px 10px 7px 0;
+  justify-content: space-between;
+  text-align: left;
+}
+.backup-select-row .row-content:hover { background: transparent; }
+.check-cell {
+  width: 32px;
+  min-height: 44px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+}
+.backup-select-row:not(.checked):not(:hover) .check-cell input {
+  border-color: color-mix(in srgb, var(--line-strong) 68%, transparent);
+  background: transparent;
+}
 .row-main { min-width: 0; display: grid; gap: 3px; }
 .row-main strong {
   overflow: hidden;
@@ -426,6 +549,23 @@ button:disabled { opacity: .45; cursor: not-allowed; }
 .new-provider { border-top: 1px solid var(--line); padding-top: 16px; display: grid; gap: 10px; }
 .new-provider h3 { display: flex; align-items: center; gap: 6px; font-size: 14px; font-weight: 600; }
 .field { display: grid; gap: 5px; color: var(--muted); font-size: 12px; }
+.field span { display: inline-flex; align-items: center; gap: 6px; min-width: 0; }
+.field em {
+  font-style: normal;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 1px 6px;
+  color: var(--muted);
+  background: var(--chip-bg);
+  font-size: 10px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.field small {
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.35;
+}
 .field input, .field select { width: 100%; height: 32px; border: 1px solid var(--line); border-radius: 7px; background: var(--panel-2); padding: 0 9px; }
 
 .modal {
@@ -496,6 +636,15 @@ button:disabled { opacity: .45; cursor: not-allowed; }
 .provider-modal { width: min(860px, calc(100vw - 48px)); }
 .provider-form-scroll { min-height: 0; overflow: auto; display: grid; gap: 14px; padding-right: 2px; }
 .form-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; min-width: 0; }
+.inline-note {
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  background: var(--chip-bg);
+  color: var(--text);
+  padding: 9px 10px;
+  font-size: 12px;
+  line-height: 1.4;
+}
 .switch-row { display: flex; flex-wrap: wrap; gap: 10px 14px; color: var(--muted); }
 .switch-row label { display: inline-flex; align-items: center; gap: 6px; min-height: 28px; }
 .raw-editor { min-height: 220px; max-height: 32vh; background: var(--code-bg); color: var(--code-text); }

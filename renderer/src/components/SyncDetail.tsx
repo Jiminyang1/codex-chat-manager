@@ -43,12 +43,12 @@ function SyncDetail({ item, activeProvider, working = false, onRun }: {
         <p>{item.description}</p>
       </div>
       <div className="kv">
-        <span>Current provider</span><strong>{activeProvider || "-"}</strong>
+        <span>Current runtime</span><strong>{activeProvider || "-"}</strong>
         <span>Affected chats</span><strong>{item.count}</strong>
         <span>Backup</span><strong>created before apply</strong>
       </div>
       <div className="sync-group-list">
-        <div className="sync-title">{isRepair ? "Conflicting provider tags" : "Chats outside current provider"}</div>
+        <div className="sync-title">{isRepair ? "Conflicting provider tags" : "Manual runtime retag candidates"}</div>
         {item.groups.map((group: JsonRecord) => {
           const flow = splitProviderFlow(group.provider, isRepair ? String(group.targetProvider ?? "") : targetLabel);
           return (

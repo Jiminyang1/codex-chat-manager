@@ -13,7 +13,8 @@ import {
   Search,
   Settings,
   Shield,
-  Sun
+  Sun,
+  Trash2
 } from "lucide-react";
 import { getCodexHome, invoke, setCodexHome } from "./api";
 import { BackupDetail } from "./components/BackupDetail";
@@ -24,6 +25,7 @@ import { SyncDetail } from "./components/SyncDetail";
 import { ThreadDetail } from "./components/ThreadDetail";
 import logoUrl from "./assets/logo.svg";
 import {
+  backupBulkDeleteMessage,
   backupGroupMeta,
   backupProjectLabel,
   backupProjectPath,
@@ -35,7 +37,7 @@ import {
   backupTitle
 } from "./lib/backup-helpers";
 import { clamp, formatDate, projectName, shortPath, storedNumber } from "./lib/format";
-import { defaultProviderAuth, defaultProviderConfig, officialSwitchMessage, profileSummary, providerIdFromLabel } from "./lib/provider-helpers";
+import { alignProviderBlockWithModelProvider, defaultProviderAuth, defaultProviderConfig, officialSwitchMessage, profileSummary } from "./lib/provider-helpers";
 import "./styles.css";
 import type { BackupSummary, ConfigOverview, JsonRecord, ProcessStatus, Project, ProviderProfile, Status, SyncMode, Thread } from "../../src/types";
 import type { ActionName } from "../../src/actions.cjs";
@@ -47,6 +49,7 @@ type ProviderItem = JsonRecord & {
   id: string;
   title: string;
   active?: boolean;
+  current?: boolean;
   profile?: ProviderProfile;
   summary?: JsonRecord | null;
 };
@@ -165,9 +168,10 @@ function App() {
   const [selectedProjectlessThreadId, setSelectedProjectlessThreadId] = useState("");
   const [selectedProvider, setSelectedProvider] = useState("");
   const [selectedThreadId, setSelectedThreadId] = useState("");
-  const [selectedSyncMode, setSelectedSyncMode] = useState<SyncMode>("retag");
+  const [selectedSyncMode, setSelectedSyncMode] = useState<SyncMode>("repair");
   const [backupCategory, setBackupCategory] = useState<BackupCategory>("chats");
   const [selectedBackupPath, setSelectedBackupPath] = useState("");
+  const [selectedBackupPaths, setSelectedBackupPaths] = useState<Set<string>>(() => new Set());
   const [view, setView] = useState<View>("chats");
   const [search, setSearch] = useState("");
   const [archived, setArchived] = useState(false);
@@ -182,8 +186,8 @@ function App() {
   const [editor, setEditor] = useState<EditorState>(null);
   const [newProvider, setNewProvider] = useState<NewProviderDraft>({
     label: "",
-    configText: "",
-    authText: "",
+    configText: defaultProviderConfig("custom"),
+    authText: defaultProviderAuth(),
     switch: true
   });
   const [expandedBackupGroups, setExpandedBackupGroups] = useState<Set<string>>(() => new Set());
@@ -229,18 +233,6 @@ function App() {
   const syncAttentionCount = repairCount + retagCount;
   const syncItems = useMemo<SyncItem[]>(() => [
     {
-      id: "retag",
-      title: "Sync chats to current provider",
-      count: retagCount,
-      subtitle: activeProvider ? `${retagCount} chat${retagCount === 1 ? "" : "s"} outside ${activeProvider}` : "No current provider detected",
-      description: activeProvider
-        ? `Current provider is ${activeProvider}. These chats have another provider tag and may be hidden until synced.`
-        : "Set a current provider before syncing chats.",
-      actionLabel: "Sync chats",
-      tone: "danger",
-      groups: retagGroups
-    },
-    {
       id: "repair",
       title: "Conflicting provider tags",
       count: repairCount,
@@ -249,28 +241,58 @@ function App() {
       actionLabel: "Fix conflicts",
       tone: "primary",
       groups: status?.providerRepairMismatchGroups ?? []
+    },
+    {
+      id: "retag",
+      title: "Manual runtime retag",
+      count: retagCount,
+      subtitle: activeProvider ? `${retagCount} historical chat${retagCount === 1 ? "" : "s"} use another runtime tag` : "No current provider detected",
+      description: activeProvider
+        ? "Manual migration only. Retag only when these chats really belong to the current Codex runtime provider."
+        : "Set a current provider before retagging chats.",
+      actionLabel: "Retag runtime",
+      tone: "danger",
+      groups: retagGroups
     }
   ], [activeProvider, repairCount, retagCount, retagGroups, status]);
   const selectedSyncItem = syncItems.find((item) => item.id === selectedSyncMode) ?? syncItems[0];
-  const providerItems = useMemo<ProviderItem[]>(() => [
-    {
+  const providerItems = useMemo<ProviderItem[]>(() => {
+    const savedProfiles = config?.profiles ?? [];
+    const officialItem: ProviderItem = {
       id: "official",
       title: "OpenAI Official",
       badge: "official",
       active: config?.kind === "official" && activeProvider === "openai",
       summary: { provider: "openai", baseUrl: "built-in", model: config?.model ?? "-" }
-    },
-    ...(config?.profiles ?? []).map((profile) => ({
+    };
+    const profileItems: ProviderItem[] = savedProfiles.map((profile) => ({
       id: profile.id,
       profile,
       title: profile.label,
       badge: profile.kind,
       active: profile.active,
       summary: profileSummaries[profile.id]
-    }))
-  ], [activeProvider, config, profileSummaries]);
+    }));
+    const hasActiveSavedItem = officialItem.active || savedProfiles.some((profile) => profile.active);
+    const currentItem = activeProvider && !hasActiveSavedItem
+      ? [{
+          id: "current-config",
+          title: "Detected current config",
+          badge: "not saved",
+          active: true,
+          current: true,
+          summary: {
+            provider: activeProvider,
+            baseUrl: config?.provider?.baseUrl ?? (config?.kind === "official" ? "built-in" : "-"),
+            model: config?.model ?? "-"
+          }
+        } satisfies ProviderItem]
+      : [];
+    return [...currentItem, officialItem, ...profileItems];
+  }, [activeProvider, config, profileSummaries]);
   const profilesKey = (config?.profiles ?? []).map((profile) => `${profile.id}:${profile.updatedAt ?? profile.createdAt ?? ""}:${profile.active ? "1" : "0"}`).join("|");
   const selectedProviderItem = providerItems.find((item) => item.id === selectedProviderCard) ?? providerItems[0] ?? null;
+  const activeProviderItem = providerItems.find((item) => item.active) ?? null;
   const backupCounts = useMemo<Record<BackupCategory, number>>(() => {
     const counts: Record<BackupCategory, number> = { chats: 0, providers: 0, sync: 0 };
     for (const backup of backups) {
@@ -306,6 +328,9 @@ function App() {
     return groups;
   }, [filteredBackups]);
   const selectedBackup = filteredBackups.find((backup) => backup.path === selectedBackupPath) ?? filteredBackups[0] ?? null;
+  const selectedBackups = useMemo(() => backups.filter((backup) => selectedBackupPaths.has(backup.path)), [backups, selectedBackupPaths]);
+  const selectedVisibleBackupCount = useMemo(() => filteredBackups.filter((backup) => selectedBackupPaths.has(backup.path)).length, [filteredBackups, selectedBackupPaths]);
+  const allVisibleBackupsSelected = filteredBackups.length > 0 && selectedVisibleBackupCount === filteredBackups.length;
 
   function notify(message: string) {
     setToast(message);
@@ -320,6 +345,49 @@ function App() {
       else next.add(key);
       return next;
     });
+  }
+
+  function toggleBackupSelection(backupPath: string, checked: boolean): void {
+    setSelectedBackupPaths((current) => {
+      const next = new Set(current);
+      if (checked) next.add(backupPath);
+      else next.delete(backupPath);
+      return next;
+    });
+  }
+
+  function toggleVisibleBackupSelection(checked: boolean): void {
+    setSelectedBackupPaths((current) => {
+      const next = new Set(current);
+      for (const backup of filteredBackups) {
+        if (checked) next.add(backup.path);
+        else next.delete(backup.path);
+      }
+      return next;
+    });
+  }
+
+  async function deleteSelectedBackups(): Promise<boolean> {
+    if (!selectedBackups.length || runningActionRef.current) return false;
+    runningActionRef.current = "backup:delete";
+    setRunningAction("backup:delete");
+    try {
+      for (const backup of selectedBackups) {
+        await invoke("backup:delete", { codexHome, backupDir: backup.path, confirmed: true });
+      }
+      const deletedCount = selectedBackups.length;
+      setModal(null);
+      setSelectedBackupPaths(new Set());
+      notify(`${deletedCount} backup${deletedCount === 1 ? "" : "s"} deleted`);
+      await loadAll();
+      return true;
+    } catch (error) {
+      notify(error instanceof Error ? error.message : String(error));
+      return false;
+    } finally {
+      runningActionRef.current = "";
+      setRunningAction("");
+    }
   }
 
   useEffect(() => {
@@ -399,6 +467,24 @@ function App() {
     }
   }
 
+  async function refreshRuntimeStatus() {
+    if (runningActionRef.current) return;
+    setBusy(true);
+    try {
+      const nextConfig = await invoke("config:get", { codexHome });
+      const resolvedHome = codexHome || nextConfig.codexHome;
+      setCodexHome(resolvedHome);
+      const nextStatus = await invoke("status:get", { codexHome: resolvedHome });
+      setConfig(nextConfig);
+      setStatus(nextStatus);
+      if (!codexHome && resolvedHome) setHome(resolvedHome);
+    } catch (error) {
+      notify(error instanceof Error ? error.message : String(error));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   useEffect(() => {
     loadAll();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -408,6 +494,28 @@ function App() {
     loadThreads();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedProject, selectedProvider, archived]);
+
+  useEffect(() => {
+    const validPaths = new Set(backups.map((backup) => backup.path));
+    setSelectedBackupPaths((current) => {
+      const next = new Set([...current].filter((backupPath) => validPaths.has(backupPath)));
+      return next.size === current.size ? current : next;
+    });
+  }, [backups]);
+
+  useEffect(() => {
+    if (view === "sync") void refreshRuntimeStatus();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [view]);
+
+  useEffect(() => {
+    if (view !== "sync") return;
+    if (selectedSyncMode === "repair" && repairCount === 0 && retagCount > 0) {
+      setSelectedSyncMode("retag");
+    } else if (selectedSyncMode === "retag" && retagCount === 0 && repairCount > 0) {
+      setSelectedSyncMode("repair");
+    }
+  }, [repairCount, retagCount, selectedSyncMode, view]);
 
   useEffect(() => {
     async function loadProfileSummaries() {
@@ -454,6 +562,29 @@ function App() {
     async function loadProviderFiles() {
       if (view !== "providers" || !selectedProviderItem) return;
       const officialSnapshot = config?.officialAuthSnapshot;
+      if (selectedProviderItem.current) {
+        const key = `current:${config?.configPath ?? ""}:${config?.raw?.length ?? 0}:${config?.auth?.exists ? "auth" : "noauth"}`;
+        setProviderFiles((previous) => ({ ...previous, key, loading: true, error: "", missing: false }));
+        try {
+          const authFile = await invoke("config:file:get", { codexHome, file: "auth" }).catch(() => ({ raw: "" }));
+          if (!cancelled) {
+            setProviderFiles({
+              key,
+              loading: false,
+              error: "",
+              config: config?.raw ?? "",
+              auth: authFile.raw ?? "",
+              missing: false,
+              source: "current"
+            });
+          }
+        } catch (error) {
+          if (!cancelled) {
+            setProviderFiles({ key, loading: false, error: error instanceof Error ? error.message : String(error), config: "", auth: "", missing: false });
+          }
+        }
+        return;
+      }
       if (selectedProviderItem.id === "official") {
         const key = `official:${officialSnapshot?.source ?? "missing"}:${officialSnapshot?.profileId ?? officialSnapshot?.backupDir ?? ""}`;
         setProviderFiles((previous) => ({ ...previous, key, loading: true, error: "", missing: false }));
@@ -518,7 +649,11 @@ function App() {
   }, [
     view,
     selectedProviderItem?.id,
+    selectedProviderItem?.current,
     selectedProviderItem?.profile?.id,
+    config?.configPath,
+    config?.raw,
+    config?.auth?.exists,
     config?.officialAuthSnapshot?.source,
     config?.officialAuthSnapshot?.profileId,
     config?.officialAuthSnapshot?.backupDir,
@@ -610,15 +745,13 @@ function App() {
         content: editor.drafts.config,
         confirmed: true
       });
-      if (editor.drafts.auth.trim()) {
-        await invoke("profile:file:write", {
-          codexHome,
-          profileId: editor.profile.id,
-          file: "auth",
-          content: editor.drafts.auth,
-          confirmed: true
-        });
-      }
+      await invoke("profile:file:write", {
+        codexHome,
+        profileId: editor.profile.id,
+        file: "auth",
+        content: editor.drafts.auth,
+        confirmed: true
+      });
       setEditor(null);
       notify("Profile saved");
       await loadAll();
@@ -630,17 +763,19 @@ function App() {
   async function createNewProvider(event: FormEvent<HTMLFormElement>): Promise<void> {
     event.preventDefault();
     try {
+      const alignedConfigText = alignProviderBlockWithModelProvider(newProvider.configText);
       const providerPayload = {
         ...newProvider,
-        configText: newProvider.configText || defaultProviderConfig(providerIdFromLabel(newProvider.label) || "custom"),
-        authText: newProvider.authText || defaultProviderAuth()
+        label: newProvider.label.trim(),
+        configText: alignedConfigText,
+        authText: newProvider.authText
       };
       const didCreate = await runMutation("provider:create", providerPayload, "Provider created and active");
       if (!didCreate) return;
       setNewProvider({
         label: "",
-        configText: "",
-        authText: "",
+        configText: defaultProviderConfig("custom"),
+        authText: defaultProviderAuth(),
         switch: true
       });
       setModal(null);
@@ -781,18 +916,36 @@ function App() {
 
             {view === "providers" && (
               <>
-                <div className="pane-head">
-                  <div><h1>Providers</h1><p>Active: {activeProvider || "-"}</p></div>
-                  <button className="primary compact" onClick={() => setModal({ kind: "new-provider" })} type="button"><Plus size={14} /> New</button>
+                <div className="pane-head provider-pane-head">
+                  <div>
+                    <h1>Providers</h1>
+                    <div className="provider-active">
+                      <span>Active</span>
+                      <strong>{activeProvider || "-"}</strong>
+                      {activeProviderItem?.current && <em>detected, not saved</em>}
+                    </div>
+                  </div>
+                  <button className="primary compact" onClick={() => {
+                    setNewProvider({
+                      label: "",
+                      configText: defaultProviderConfig("custom"),
+                      authText: defaultProviderAuth(),
+                      switch: true
+                    });
+                    setModal({ kind: "new-provider" });
+                  }} type="button"><Plus size={14} /> New</button>
                 </div>
                 <div className="rows">
                   {providerItems.map((item) => (
-                    <button className={`row ${selectedProviderCard === item.id ? "selected" : ""}`} key={item.id} onClick={() => setSelectedProviderCard(item.id)} type="button">
+                    <button className={`row provider-row ${item.current ? "detected" : ""} ${selectedProviderCard === item.id ? "selected" : ""}`} key={item.id} onClick={() => setSelectedProviderCard(item.id)} type="button">
                       <div className="row-main">
                         <strong>{item.title}</strong>
                         <span>{item.summary?.provider ?? "-"} · {item.summary?.baseUrl ?? "-"} · {item.summary?.model ?? "-"}</span>
                       </div>
-                      {item.active ? <span className="badge ok">active</span> : <ChevronRight size={15} />}
+                      <div className="row-tail">
+                        {item.current && <span className="badge warn">not saved</span>}
+                        {item.active ? <span className="badge ok">active</span> : <ChevronRight size={15} />}
+                      </div>
                     </button>
                   ))}
                 </div>
@@ -804,7 +957,7 @@ function App() {
                 <div className="pane-head">
                   <div>
                     <h1 className="title-line">Sync Chat <span className="badge beta">Beta</span></h1>
-                    <p>{syncAttentionCount ? `${syncAttentionCount} chats need attention` : "All chat tags are clean"} · active {activeProvider || "-"}</p>
+                    <p>{syncAttentionCount ? `${syncAttentionCount} runtime tag issue${syncAttentionCount === 1 ? "" : "s"} need attention` : "Runtime tags clean"} · active {activeProvider || "-"}</p>
                   </div>
                 </div>
                 <div className="rows">
@@ -823,10 +976,26 @@ function App() {
 
             {view === "backups" && (
               <>
-                <div className="pane-head">
+                <div className="pane-head backup-pane-head">
                   <div>
                     <h1>{backupCategoryTitle(backupCategory)}</h1>
                     <p>{filteredBackups.length} of {backups.length} restorable snapshots</p>
+                  </div>
+                  <div className={`pane-actions backup-select-tools ${selectedBackups.length ? "has-selection" : ""}`}>
+                    <label className="backup-select-all">
+                      <input checked={allVisibleBackupsSelected} disabled={!filteredBackups.length} onChange={(event) => toggleVisibleBackupSelection(event.currentTarget.checked)} type="checkbox" />
+                      <span>All</span>
+                    </label>
+                    {selectedBackups.length > 0 && <span className="selection-pill">{selectedBackups.length} selected</span>}
+                    {selectedBackups.length > 0 && (
+                      <button className="danger ghost compact backup-delete-action" disabled={Boolean(runningAction)} onClick={() => setModal({
+                        title: "Delete selected backups",
+                        body: backupBulkDeleteMessage(selectedBackups),
+                        confirmLabel: `Delete ${selectedBackups.length}`,
+                        tone: "danger",
+                        action: deleteSelectedBackups
+                      })} title="Delete selected backups" type="button"><Trash2 size={14} /> Delete</button>
+                    )}
                   </div>
                 </div>
                 <div className="rows">
@@ -842,28 +1011,38 @@ function App() {
                           <em title={`${group.backups.length} backup snapshot${group.backups.length === 1 ? "" : "s"}`}>{group.backups.length}</em>
                         </button>
                         {expandedBackupGroups.has(group.key) && group.backups.map((backup) => (
-                          <button className={`row backup-row-nested ${selectedBackup?.path === backup.path ? "selected" : ""}`} key={backup.path} onClick={() => setSelectedBackupPath(backup.path)} type="button">
-                            <div className="row-main">
-                              <strong>{backupRowTitle(backup)}</strong>
-                              <span>{backupRowSubtitle(backup)}</span>
-                            </div>
-                            <div className="row-tail">
-                              <ChevronRight size={15} />
-                            </div>
-                          </button>
+                          <div className={`row backup-select-row backup-row-nested ${selectedBackup?.path === backup.path ? "selected" : ""} ${selectedBackupPaths.has(backup.path) ? "checked" : ""}`} key={backup.path}>
+                            <label className="check-cell" title="Select backup">
+                              <input aria-label={`Select ${backupRowTitle(backup)}`} checked={selectedBackupPaths.has(backup.path)} onChange={(event) => toggleBackupSelection(backup.path, event.currentTarget.checked)} type="checkbox" />
+                            </label>
+                            <button className="row-content" onClick={() => setSelectedBackupPath(backup.path)} type="button">
+                              <div className="row-main">
+                                <strong>{backupRowTitle(backup)}</strong>
+                                <span>{backupRowSubtitle(backup)}</span>
+                              </div>
+                              <div className="row-tail">
+                                <ChevronRight size={15} />
+                              </div>
+                            </button>
+                          </div>
                         ))}
                       </div>
                     ))
                     : filteredBackups.map((backup) => (
-                      <button className={`row ${selectedBackup?.path === backup.path ? "selected" : ""}`} key={backup.path} onClick={() => setSelectedBackupPath(backup.path)} type="button">
-                        <div className="row-main">
-                          <strong>{backupTitle(backup)}</strong>
-                          <span>{backupSubtitle(backup)}</span>
-                        </div>
-                        <div className="row-tail">
-                          <ChevronRight size={15} />
-                        </div>
-                      </button>
+                      <div className={`row backup-select-row ${selectedBackup?.path === backup.path ? "selected" : ""} ${selectedBackupPaths.has(backup.path) ? "checked" : ""}`} key={backup.path}>
+                        <label className="check-cell" title="Select backup">
+                          <input aria-label={`Select ${backupTitle(backup)}`} checked={selectedBackupPaths.has(backup.path)} onChange={(event) => toggleBackupSelection(backup.path, event.currentTarget.checked)} type="checkbox" />
+                        </label>
+                        <button className="row-content" onClick={() => setSelectedBackupPath(backup.path)} type="button">
+                          <div className="row-main">
+                            <strong>{backupTitle(backup)}</strong>
+                            <span>{backupSubtitle(backup)}</span>
+                          </div>
+                          <div className="row-tail">
+                            <ChevronRight size={15} />
+                          </div>
+                        </button>
+                      </div>
                     ))}
                   {!filteredBackups.length && <div className="empty">No {backupCategoryTitle(backupCategory).toLowerCase()} backups yet.</div>}
                 </div>
@@ -910,22 +1089,22 @@ function App() {
                 activeProvider={activeProvider}
                 working={busy || runningAction === "config:sync"}
                 onRun={(item) => setModal({
-                  title: item.id === "repair" ? "Fix chat tag conflicts" : "Sync chats to current provider",
+                  title: item.id === "repair" ? "Fix chat tag conflicts" : "Retag chat runtime provider",
                   body: item.id === "repair"
                     ? `Fix ${item.count} chat(s) where SQLite and rollout provider tags disagree. Each chat keeps its original provider.`
                     : [
-                        `Sync ${item.count} chat(s) to the current provider: ${activeProvider || "-"}.`,
+                        `Retag ${item.count} historical chat(s) to the current Codex runtime provider: ${activeProvider || "-"}.`,
                         "",
-                        `Chats outside ${activeProvider || "the current provider"}: ${item.groups.map((group) => `${group.provider} (${group.count})`).join(", ") || "none"}.`,
+                        `Current runtime groups: ${item.groups.map((group) => `${group.provider} (${group.count})`).join(", ") || "none"}.`,
                         "",
-                        "Sync Chat is beta and creates a restorable backup first."
+                        "Only retag when these chats should belong to the current runtime provider. Sync Chat creates a restorable backup first."
                       ].join("\n"),
-                  confirmLabel: item.id === "repair" ? "Fix conflicts" : "Sync chats",
+                  confirmLabel: item.id === "repair" ? "Fix conflicts" : "Retag runtime",
                   tone: item.tone,
                   action: () => runMutation(
                     "config:sync",
                     { mode: item.id },
-                    item.id === "repair" ? "Chat tag conflicts fixed" : "Chats synced to current provider"
+                    item.id === "repair" ? "Chat tag conflicts fixed" : "Chats retagged to current runtime provider"
                   )
                 })}
               />

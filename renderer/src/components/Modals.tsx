@@ -1,11 +1,9 @@
 import React from "react";
 import { Plus } from "lucide-react";
 import {
-  defaultProviderAuth,
-  defaultProviderConfig,
-  providerIdFromConfig,
-  providerIdFromLabel,
-  updateProviderIdInDraftConfig
+  alignProviderBlockWithModelProvider,
+  isReservedProviderId,
+  providerIdFromConfig
 } from "../lib/provider-helpers";
 import type { Dispatch, FormEvent, SetStateAction } from "react";
 import type { ProviderProfile } from "../../../src/types";
@@ -36,22 +34,24 @@ function NewProviderModal({ draft, setDraft, onCancel, onSubmit }: {
   onCancel: () => void;
   onSubmit: (event: FormEvent<HTMLFormElement>) => void;
 }) {
-  const defaultId = providerIdFromLabel(draft.label) || "custom";
-  const configText = draft.configText || defaultProviderConfig(defaultId);
-  const authText = draft.authText || defaultProviderAuth();
+  const configText = draft.configText;
+  const authText = draft.authText;
   const providerId = providerIdFromConfig(configText);
+  const providerIdState = providerId
+    ? isReservedProviderId(providerId) ? "Built-in runtime" : "Runtime id"
+    : "Missing";
 
   function update(patch: Partial<NewProviderDraft>) {
     setDraft({ ...draft, ...patch });
   }
 
   function updateLabel(value: string) {
-    const previousId = providerIdFromLabel(draft.label) || "custom";
-    const nextProviderId = providerIdFromLabel(value) || "custom";
-    update({
-      label: value,
-      configText: updateProviderIdInDraftConfig(draft.configText, previousId, nextProviderId)
-    });
+    update({ label: value });
+  }
+
+  function updateConfigText(value: string) {
+    const alignedValue = alignProviderBlockWithModelProvider(value);
+    update({ configText: alignedValue });
   }
 
   return (
@@ -65,16 +65,17 @@ function NewProviderModal({ draft, setDraft, onCancel, onSubmit }: {
           <div className="form-grid">
             <label className="field">
               <span>Name</span>
-              <input value={draft.label} onChange={(event) => updateLabel(event.target.value)} placeholder="Axis" required />
+              <input value={draft.label} onChange={(event) => updateLabel(event.target.value)} placeholder="Fenno" required />
             </label>
             <label className="field">
-              <span>Provider ID</span>
-              <input value={providerId} placeholder="from config.toml" readOnly />
+              <span>Runtime Provider ID <em>{providerIdState}</em></span>
+              <input value={providerId} placeholder="from model_provider" readOnly />
+              <small>Codex reads this value from model_provider and uses it for chat history grouping.</small>
             </label>
           </div>
           <label className="field">
             <span>config.toml</span>
-            <textarea className="raw-editor" value={configText} onChange={(event) => update({ configText: event.target.value })} spellCheck="false" required />
+            <textarea className="raw-editor" value={configText} onChange={(event) => updateConfigText(event.target.value)} spellCheck="false" required />
           </label>
           <label className="field">
             <span>auth.json</span>
@@ -149,8 +150,9 @@ function ProfileEditor({ editor, setEditor, onCancel, onSave }: {
         <div className="segmented"><button className={editor.tab === "config" ? "active" : ""} onClick={() => setEditor({ ...editor, tab: "config" })} type="button">config.toml</button><button className={editor.tab === "auth" ? "active" : ""} onClick={() => setEditor({ ...editor, tab: "auth" })} type="button">auth.json</button></div>
         {editor.tab === "config" && (
           <label className="field">
-            <span>Provider ID</span>
+            <span>Runtime Provider ID <em>Codex</em></span>
             <input value={providerId} placeholder="from config.toml" readOnly />
+            <small>This is the value Codex reads from model_provider and uses for chat history grouping.</small>
           </label>
         )}
         <textarea value={value} onChange={(event) => setEditor({ ...editor, drafts: { ...editor.drafts, [editor.tab]: event.target.value } })} spellCheck="false" />

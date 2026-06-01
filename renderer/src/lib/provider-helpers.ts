@@ -1,5 +1,7 @@
 import type { JsonRecord } from "../../../src/types";
 
+const BUILTIN_PROVIDER_IDS = new Set(["openai", "ollama", "lmstudio"]);
+
 function profileSummary(raw: string): JsonRecord {
   const provider = raw?.match(/^model_provider\s*=\s*"?(.+?)"?\s*$/m)?.[1]?.replaceAll("\"", "") ?? "-";
   const baseUrl = raw?.match(/^base_url\s*=\s*"?(.+?)"?\s*$/m)?.[1]?.replaceAll("\"", "") ?? "-";
@@ -12,7 +14,8 @@ function profileSummary(raw: string): JsonRecord {
 }
 
 function providerIdFromConfig(raw: string): string {
-  return raw?.match(/^model_provider\s*=\s*"?(.+?)"?\s*$/m)?.[1]?.replaceAll("\"", "").trim() ?? "";
+  const match = raw?.match(/^\s*model_provider\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s#]+))/m);
+  return String(match?.[1] ?? match?.[2] ?? match?.[3] ?? "").trim();
 }
 
 function officialSwitchMessage(snapshot: JsonRecord | null | undefined): string {
@@ -29,13 +32,33 @@ function officialSwitchMessage(snapshot: JsonRecord | null | undefined): string 
   return "Use OpenAI Official with current auth.json.";
 }
 
-function providerIdFromLabel(value: unknown): string {
-  return String(value ?? "")
-    .trim()
-    .toLowerCase()
-    .replace(/[^a-z0-9._-]+/g, "-")
-    .replace(/^-+|-+$/g, "")
-    .slice(0, 48);
+function isReservedProviderId(value: unknown): boolean {
+  return BUILTIN_PROVIDER_IDS.has(String(value ?? "").trim());
+}
+
+function providerBlockIdsFromConfig(raw: string): string[] {
+  const ids: string[] = [];
+  for (const line of String(raw ?? "").split("\n")) {
+    const match = line.match(/^\s*\[model_providers\.(?:"([^"]+)"|([^\]]+))\]\s*$/);
+    const id = String(match?.[1] ?? match?.[2] ?? "").trim();
+    if (id && !ids.includes(id)) ids.push(id);
+  }
+  return ids;
+}
+
+function alignProviderBlockWithModelProvider(raw: string): string {
+  const providerId = providerIdFromConfig(raw);
+  if (!providerId) return raw;
+  const blockIds = providerBlockIdsFromConfig(raw);
+  if (blockIds.includes(providerId) || blockIds.length !== 1) return raw;
+  return String(raw ?? "")
+    .split("\n")
+    .map((line) => {
+      const match = line.match(/^(\s*)\[model_providers\.(?:"([^"]+)"|([^\]]+))\](\s*)$/);
+      if (!match) return line;
+      return `${match[1]}[model_providers.${providerId}]${match[4] ?? ""}`;
+    })
+    .join("\n");
 }
 
 function defaultProviderConfig(providerId: string): string {
@@ -52,24 +75,16 @@ function defaultProviderConfig(providerId: string): string {
   ].join("\n");
 }
 
-function updateProviderIdInDraftConfig(configText: string, previousId: string, nextId: string): string {
-  const oldId = previousId || "custom";
-  const safeNextId = nextId || "custom";
-  const oldConfig = defaultProviderConfig(oldId);
-  if (!configText || configText === oldConfig) return defaultProviderConfig(safeNextId);
-  return configText;
-}
-
 function defaultProviderAuth(): string {
   return `${JSON.stringify({ OPENAI_API_KEY: "" }, null, 2)}\n`;
 }
 
 export {
+  alignProviderBlockWithModelProvider,
   defaultProviderAuth,
   defaultProviderConfig,
+  isReservedProviderId,
   officialSwitchMessage,
   profileSummary,
-  providerIdFromConfig,
-  providerIdFromLabel,
-  updateProviderIdInDraftConfig
+  providerIdFromConfig
 };

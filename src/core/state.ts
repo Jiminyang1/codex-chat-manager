@@ -1174,6 +1174,16 @@ async function resolveBackupRef(home: string, ref: unknown): Promise<string | un
   return backup.path;
 }
 
+function safeBackupDirForDelete(home: string, backupDir: string): string {
+  const root = path.resolve(backupRoot(home));
+  const source = path.resolve(backupDir);
+  const relative = path.relative(root, source);
+  if (!relative || relative.startsWith("..") || path.isAbsolute(relative) || relative.includes(path.sep)) {
+    throw new Error(`Refusing to delete backup outside ${backupRoot(home)}: ${source}`);
+  }
+  return source;
+}
+
 function removeThreadRefsFromGlobalState(state: JsonRecord, ids: string[]): void {
   const idSet = new Set(ids);
   const arrayKeys = ["projectless-thread-ids", "pinned-thread-ids"];
@@ -1513,12 +1523,36 @@ async function restoreBackup(home: string, backupDir: string, execute: boolean, 
   };
 }
 
+async function deleteBackup(home: string, backupDir: string, { execute }: { execute: boolean }): Promise<JsonRecord> {
+  const source = safeBackupDirForDelete(home, backupDir);
+  let stat;
+  try {
+    stat = await fs.stat(source);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException)?.code === "ENOENT") {
+      throw new Error(`Backup not found: ${source}`);
+    }
+    throw error;
+  }
+  if (!stat.isDirectory()) {
+    throw new Error(`Backup is not a directory: ${source}`);
+  }
+  const metadata = await readJsonIfPresent(path.join(source, "metadata.json"), null);
+  const backup = await backupSummary(source, path.basename(source), metadata, stat, home);
+  if (!execute) {
+    return { dryRun: true, backupDir: source, backup, deleted: false };
+  }
+  await fs.rm(source, { recursive: true, force: false });
+  return { dryRun: false, backupDir: source, backup, deleted: true };
+}
+
 export {
   assertThreadRolloutsInsideHome,
   codexHome,
   collectProviderTagMismatches,
   collectProviderConsistencyMismatches,
   createBackup,
+  deleteBackup,
   deleteProject,
   getProjectlessThreads,
   getProjects,

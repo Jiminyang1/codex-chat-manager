@@ -5,6 +5,7 @@ import type { ActionName, ActionPayload, ActionResult } from "./actions.cjs";
 import { isCodexDesktopRunning, quitCodexDesktop } from "./codex-process.js";
 import {
   createProvider,
+  deleteBackup,
   deleteProfile,
   deleteProject,
   fixReservedProviders,
@@ -102,6 +103,10 @@ export async function invokeAction(action: string, payload: unknown = {}): Promi
     case "backup:restore": {
       const data = parsedPayload as ActionPayload<"backup:restore">;
       return restoreBackup(home, data.backupDir, executeFromPayload(data), data.scope);
+    }
+    case "backup:delete": {
+      const data = parsedPayload as ActionPayload<"backup:delete">;
+      return deleteBackup(home, data.backupDir, { execute: executeFromPayload(data) });
     }
     case "config:get":
       return getConfigOverview(home);
