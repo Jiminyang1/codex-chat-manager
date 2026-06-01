@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, Menu, shell } from "electron";
+import { app, BrowserWindow, ipcMain, Menu, shell, type MenuItemConstructorOptions } from "electron";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { allowedActions, invokeAction } from "../src/app-api.js";
@@ -16,7 +16,7 @@ async function assertNodeSqlite() {
 }
 
 function createMenu() {
-  const template = [
+  const template: MenuItemConstructorOptions[] = [
     {
       label: app.name,
       submenu: [

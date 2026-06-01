@@ -11,16 +11,18 @@ import { invokeAction } from "../src/app-api.js";
 
 const execFileAsync = promisify(execFile);
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const sourceRoot = process.cwd();
 const cli = path.join(root, "src", "cli.js");
+type AnyRecord = Record<string, any>;
 
-async function runCli(args, options = {}) {
+async function runCli(args: string[], options: Record<string, any> = {}) {
   return execFileAsync(process.execPath, [cli, ...args], {
     cwd: root,
     ...options
   });
 }
 
-async function makeFixture({ outsideRollout = false } = {}) {
+async function makeFixture({ outsideRollout = false }: { outsideRollout?: boolean } = {}) {
   const home = await fs.mkdtemp(path.join(os.tmpdir(), "codex-chat-manager-"));
   const threadId = "019e0000-0000-7000-8000-000000000001";
   const project = path.join(home, "project");
@@ -97,17 +99,17 @@ async function makeFixture({ outsideRollout = false } = {}) {
   return { home, threadId, project, rolloutPath };
 }
 
-async function readThreadProvider(home, threadId) {
+async function readThreadProvider(home: string, threadId: string): Promise<string | null> {
   const db = new DatabaseSync(path.join(home, "state_5.sqlite"), { readOnly: true });
   try {
-    return db.prepare("SELECT model_provider FROM threads WHERE id = ?").get(threadId)?.model_provider ?? null;
+    return (db.prepare("SELECT model_provider FROM threads WHERE id = ?").get(threadId) as AnyRecord | undefined)?.model_provider ?? null;
   } finally {
     db.close();
   }
 }
 
-async function readRolloutProvider(filePath) {
-  const firstLine = (await fs.readFile(filePath, "utf8")).split("\n")[0];
+async function readRolloutProvider(filePath: string): Promise<string> {
+  const firstLine = (await fs.readFile(filePath, "utf8")).split("\n")[0] ?? "";
   return JSON.parse(firstLine).payload.model_provider;
 }
 
@@ -120,7 +122,7 @@ test("trash-thread moves rollout, removes indexes, and restore recovers them", a
   assert.equal(await exists(result.moved[0].to), true);
 
   let db = new DatabaseSync(path.join(fixture.home, "state_5.sqlite"), { readOnly: true });
-  assert.equal(db.prepare("SELECT COUNT(*) AS count FROM threads").get().count, 0);
+  assert.equal((db.prepare("SELECT COUNT(*) AS count FROM threads").get() as AnyRecord).count, 0);
   db.close();
 
   const state = JSON.parse(await fs.readFile(path.join(fixture.home, ".codex-global-state.json"), "utf8"));
@@ -130,7 +132,7 @@ test("trash-thread moves rollout, removes indexes, and restore recovers them", a
   await runCli(["restore", result.backupDir, "--codex-home", fixture.home, "--yes"]);
   assert.equal(await exists(fixture.rolloutPath), true);
   db = new DatabaseSync(path.join(fixture.home, "state_5.sqlite"), { readOnly: true });
-  assert.equal(db.prepare("SELECT COUNT(*) AS count FROM threads").get().count, 1);
+  assert.equal((db.prepare("SELECT COUNT(*) AS count FROM threads").get() as AnyRecord).count, 1);
   db.close();
 });
 
@@ -147,7 +149,7 @@ test("delete-project trashes exact-cwd threads by default and removes project ro
   assert.equal(await exists(path.join(result.backupDir, "metadata.json")), true);
 
   const db = new DatabaseSync(path.join(fixture.home, "state_5.sqlite"), { readOnly: true });
-  assert.equal(db.prepare("SELECT COUNT(*) AS count FROM threads").get().count, 0);
+  assert.equal((db.prepare("SELECT COUNT(*) AS count FROM threads").get() as AnyRecord).count, 0);
   db.close();
 
   const state = JSON.parse(await fs.readFile(path.join(fixture.home, ".codex-global-state.json"), "utf8"));
@@ -175,8 +177,8 @@ test("projects are saved workspace roots and projectless chats are separate", as
   state["projectless-thread-ids"] = [transientId];
   await fs.writeFile(path.join(fixture.home, ".codex-global-state.json"), JSON.stringify(state, null, 2));
 
-  const projects = JSON.parse((await runCli(["projects", "--codex-home", fixture.home, "--json"])).stdout);
-  assert.deepEqual(projects.map((project) => project.path), [fixture.project]);
+  const projects = JSON.parse((await runCli(["projects", "--codex-home", fixture.home, "--json"])).stdout) as AnyRecord[];
+  assert.deepEqual(projects.map((project: AnyRecord) => project.path), [fixture.project]);
 
   const projectless = await invokeAction("projectlessThreads:list", { codexHome: fixture.home });
   assert.deepEqual(projectless.map((thread) => thread.id), [transientId]);
@@ -240,8 +242,8 @@ test("backup summaries keep unsaved Codex cwd chats projectless", async () => {
 
   const deleted = JSON.parse((await runCli(["delete-project", generatedCwd, "--codex-home", fixture.home, "--yes", "--json"])).stdout);
   assert.equal(deleted.removedProjectRefs, 0);
-  const backupRows = JSON.parse((await runCli(["backups", "--codex-home", fixture.home, "--json"])).stdout);
-  const backup = backupRows.find((row) => row.path === deleted.backupDir);
+  const backupRows = JSON.parse((await runCli(["backups", "--codex-home", fixture.home, "--json"])).stdout) as AnyRecord[];
+  const backup = backupRows.find((row: AnyRecord) => row.path === deleted.backupDir) as AnyRecord;
   assert.equal(backup.kind, "project");
   assert.equal(backup.projectRoot, "");
   assert.equal(backup.chatSummaries[0].projectless, true);
@@ -388,6 +390,8 @@ test("backup list classifies provider and sync backups separately", async () => 
   const backups = await invokeAction("backups:list", { codexHome: fixture.home });
   const providerBackup = backups.find((backup) => backup.kind === "config-file");
   const syncBackup = backups.find((backup) => backup.kind === "retag");
+  assert.ok(providerBackup);
+  assert.ok(syncBackup);
   assert.equal(providerBackup.category, "providers");
   assert.deepEqual(providerBackup.scopes, ["config"]);
   assert.equal(syncBackup.category, "sync");
@@ -526,8 +530,8 @@ test("profile-switch dry-run previews changes without writing", async () => {
   const preview = JSON.parse((await runCli(["profile-switch", saved.profile.id, "--codex-home", home, "--json"])).stdout);
   assert.equal(preview.dryRun, true);
   assert.equal(preview.profile.id, saved.profile.id);
-  assert.ok(preview.changes.some((c) => c.file === "config.toml"));
-  assert.ok(preview.changes.some((c) => c.file === "auth.json"));
+  assert.ok(preview.changes.some((c: AnyRecord) => c.file === "config.toml"));
+  assert.ok(preview.changes.some((c: AnyRecord) => c.file === "auth.json"));
 
   // Nothing was written.
   assert.equal(await fs.readFile(path.join(home, "config.toml"), "utf8"), originalConfig);
@@ -598,11 +602,11 @@ test("config save, profile switch, and delete profile round-trips", async () => 
   assert.match(restored, /base_url = "https:\/\/api\.axis\.fan"/);
 
   const overview = JSON.parse((await runCli(["config-show", "--codex-home", home, "--json"])).stdout);
-  assert.ok(overview.profiles.find((p) => p.id === profileId));
+  assert.ok(overview.profiles.find((p: AnyRecord) => p.id === profileId));
 
   await runCli(["config-delete-profile", profileId, "--codex-home", home, "--json", "--yes"]);
   const afterDelete = JSON.parse((await runCli(["config-show", "--codex-home", home, "--json"])).stdout);
-  assert.equal(afterDelete.profiles.find((p) => p.id === profileId), undefined);
+  assert.equal(afterDelete.profiles.find((p: AnyRecord) => p.id === profileId), undefined);
 });
 
 test("config-sync retags mismatched chats to the active provider", async () => {
@@ -690,7 +694,7 @@ test("config-sync repair mode does not merge provider tags", async () => {
   assert.equal(result.dbUpdated, 1);
   assert.equal(result.rolloutUpdated, 0);
   const db = new DatabaseSync(path.join(fixture.home, "state_5.sqlite"), { readOnly: true });
-  assert.equal(db.prepare("SELECT model_provider FROM threads WHERE id = ?").get(fixture.threadId).model_provider, "axis");
+  assert.equal((db.prepare("SELECT model_provider FROM threads WHERE id = ?").get(fixture.threadId) as AnyRecord).model_provider, "axis");
   db.close();
   const afterMeta = JSON.parse((await fs.readFile(fixture.rolloutPath, "utf8")).split("\n")[0]);
   assert.equal(afterMeta.payload.model_provider, "axis");
@@ -956,6 +960,7 @@ test("provider:officialFiles falls back to official config from backups", async 
     content: 'model_provider = "openai-custom"\nmodel = "gpt-5.5"\n',
     confirmed: true
   })).backupDir;
+  assert.ok(backupDir);
   await fs.rm(path.join(backupDir, "auth.json"), { force: true });
 
   const files = await invokeAction("provider:officialFiles", { codexHome: home });
@@ -987,6 +992,7 @@ test("provider:useOfficial can restore official config and auth from backup", as
   assert.equal(result.authSource.source, "backup");
   assert.match(await fs.readFile(path.join(home, "config.toml"), "utf8"), /model_provider = "openai"/);
   assert.equal(JSON.parse(await fs.readFile(path.join(home, "auth.json"), "utf8")).auth_mode, "chatgpt");
+  assert.ok(backupDir);
   assert.equal(await exists(backupDir), true);
 });
 
@@ -1033,10 +1039,23 @@ test("profile file API rejects invalid third-party provider configs", async () =
 test("app API and preload action whitelist reject unknown actions", async () => {
   await assert.rejects(invokeAction("bad:action", {}), /Unknown action/);
   const preload = await fs.readFile(path.join(root, "electron", "preload.cjs"), "utf8");
+  const actions = await fs.readFile(path.join(root, "src", "actions.cjs"), "utf8");
   assert.match(preload, /Unknown action/);
-  assert.match(preload, /status:get/);
-  assert.match(preload, /codex:processStatus/);
-  assert.match(preload, /provider:officialFiles/);
+  assert.match(preload, /allowedActionNames/);
+  assert.match(actions, /status:get/);
+  assert.match(actions, /codex:processStatus/);
+  assert.match(actions, /provider:officialFiles/);
+});
+
+test("action schema rejects invalid payloads before mutations run", async () => {
+  await assert.rejects(
+    invokeAction("thread:trash", {}),
+    /Invalid payload for thread:trash: threadId/
+  );
+  await assert.rejects(
+    invokeAction("config:sync", { mode: "merge" }),
+    /Invalid payload for config:sync: mode/
+  );
 });
 
 test("Codex Desktop process actions are exposed", async () => {
@@ -1046,12 +1065,12 @@ test("Codex Desktop process actions are exposed", async () => {
 });
 
 test("renderer adapter supports Electron IPC and Web HTTP", async () => {
-  const api = await fs.readFile(path.join(root, "renderer", "src", "api.js"), "utf8");
+  const api = await fs.readFile(path.join(sourceRoot, "renderer", "src", "api.ts"), "utf8");
   assert.match(api, /window\.codexManager\?\.invoke/);
   assert.ok(api.includes('fetch("/api/action"'));
 });
 
-async function exists(filePath) {
+async function exists(filePath: string): Promise<boolean> {
   try {
     await fs.access(filePath);
     return true;

@@ -91,18 +91,18 @@ http://127.0.0.1:8765
 CLI:
 
 ```bash
-node src/cli.js status
-node src/cli.js projects       # or: ps
-node src/cli.js chats --limit 20
-node src/cli.js chats --project /Users/me/project --limit 20
-node src/cli.js chats --provider openai --all
-node src/cli.js delete-chat <chat-id-prefix>
-node src/cli.js delete-chat <chat-id-prefix> --yes
-node src/cli.js delete-project '#3'
-node src/cli.js delete-project '#3' --yes
-node src/cli.js trash-provider <provider> --yes
-node src/cli.js backups
-node src/cli.js restore '#1' --yes
+codex-chat-manager status
+codex-chat-manager projects       # or: ps
+codex-chat-manager chats --limit 20
+codex-chat-manager chats --project /Users/me/project --limit 20
+codex-chat-manager chats --provider openai --all
+codex-chat-manager delete-chat <chat-id-prefix>
+codex-chat-manager delete-chat <chat-id-prefix> --yes
+codex-chat-manager delete-project '#3'
+codex-chat-manager delete-project '#3' --yes
+codex-chat-manager trash-provider <provider> --yes
+codex-chat-manager backups
+codex-chat-manager restore '#1' --yes
 ```
 
 `delete-project` always removes the saved project root references and trashes every chat whose `cwd` exactly matches that project path.
@@ -118,6 +118,7 @@ This is a local metadata/file manager. It does not manage ChatGPT account login,
 Before publishing:
 
 ```bash
+npm run build
 npm test
 npm run pack:check
 ```

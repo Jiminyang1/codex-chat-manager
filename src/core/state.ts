@@ -4,6 +4,9 @@ import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import { DatabaseSync } from "node:sqlite";
+import { readTextIfPresent } from "./io.js";
+import { summarizeConfig } from "./config-text.js";
+import type { BackupFiles, BackupScope, BackupSummary, Project, Status, Thread, JsonRecord } from "../types.js";
 
 const execFileAsync = promisify(execFile);
 const DB_NAME = "state_5.sqlite";
@@ -11,63 +14,79 @@ const GLOBAL_STATE = ".codex-global-state.json";
 const BACKUP_ROOT = "backups_state/chat-manager";
 const CONFIG_NAME = "config.toml";
 const AUTH_NAME = "auth.json";
-const PROFILE_DIR = "chat-manager-profiles";
-const PROFILE_INDEX = "profiles.json";
-const OFFICIAL_PROFILE_ID = "openai-official";
-const OFFICIAL_PROFILE_LABEL = "OpenAI Official";
-const BUILTIN_PROVIDER_IDS = new Set(["openai"]);
 
-function codexHome(flags) {
+type CliFlags = Record<string, any> & {
+  ids?: string[];
+  all?: unknown;
+  cwd?: string;
+};
+type BackupClassification = {
+  category: string;
+  kind: string;
+  title: string;
+  subject: string;
+  scopes: BackupScope[];
+};
+
+function codexHome(flags: CliFlags): string {
   return path.resolve(flags["codex-home"] ?? process.env.CODEX_HOME ?? path.join(os.homedir(), ".codex"));
 }
 
-function dbPath(home) {
+function dbPath(home: string): string {
   return path.join(home, DB_NAME);
 }
 
-function dbSidecarPaths(home) {
+function dbSidecarPaths(home: string): string[] {
   const base = dbPath(home);
   return [`${base}-wal`, `${base}-shm`];
 }
 
-function globalStatePath(home) {
+function globalStatePath(home: string): string {
   return path.join(home, GLOBAL_STATE);
 }
 
-function backupRoot(home) {
+function backupRoot(home: string): string {
   return path.join(home, BACKUP_ROOT);
 }
 
-function timestamp() {
+function configPath(home: string): string {
+  return path.join(home, CONFIG_NAME);
+}
+
+function authPath(home: string): string {
+  return path.join(home, AUTH_NAME);
+}
+
+function timestamp(): string {
   return new Date().toISOString().replaceAll("-", "").replaceAll(":", "").replace(".", "").replace("Z", "Z");
 }
 
-function normalizePathForCompare(value) {
+function normalizePathForCompare(value: unknown): string | null {
   if (typeof value !== "string") return null;
   const trimmed = value.trim();
   if (!trimmed) return null;
   return path.resolve(trimmed).replace(/\/+$/, "").toLowerCase();
 }
 
-function isInsideDir(parent, child) {
+function isInsideDir(parent: string, child: string): boolean {
   const resolvedParent = path.resolve(parent);
   const resolvedChild = path.resolve(child);
   const relative = path.relative(resolvedParent, resolvedChild);
   return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
 }
 
-function relativeInside(parent, child) {
+function relativeInside(parent: string, child: string): string {
   if (!isInsideDir(parent, child)) {
     throw new Error(`Refusing to operate on rollout outside Codex home: ${child}`);
   }
   return path.relative(path.resolve(parent), path.resolve(child));
 }
 
-function isTruthy(value) {
+function isTruthy(value: unknown): boolean {
   return value === true || value === "true" || value === "1" || value === "yes";
 }
 
-function parseLimit(value, fallback = 50) {
+function parseLimit(value: unknown, fallback = 50): number {
   if (value === undefined) return fallback;
   const parsed = Number.parseInt(String(value), 10);
   if (!Number.isInteger(parsed) || parsed < 1) {
@@ -76,7 +95,7 @@ function parseLimit(value, fallback = 50) {
   return parsed;
 }
 
-function parsePort(value, fallback = 8765) {
+function parsePort(value: unknown, fallback = 8765): number {
   if (value === undefined) return fallback;
   const parsed = Number.parseInt(String(value), 10);
   if (!Number.isInteger(parsed) || parsed < 1 || parsed > 65535) {
@@ -85,7 +104,7 @@ function parsePort(value, fallback = 8765) {
   return parsed;
 }
 
-async function pathExists(filePath) {
+async function pathExists(filePath: string): Promise<boolean> {
   try {
     await fs.access(filePath);
     return true;
@@ -94,7 +113,7 @@ async function pathExists(filePath) {
   }
 }
 
-function openDb(home, options = {}) {
+function openDb(home: string, options: any = {}): DatabaseSync {
   const db = new DatabaseSync(dbPath(home), options);
   // Tolerate Codex Desktop holding the DB: wait for the lock instead of failing.
   try {
@@ -105,35 +124,36 @@ function openDb(home, options = {}) {
   return db;
 }
 
-function getColumns(db, table) {
-  return new Set(db.prepare(`PRAGMA table_info("${table.replaceAll("\"", "\"\"")}")`).all().map((row) => row.name));
+function getColumns(db: DatabaseSync, table: string): Set<string> {
+  return new Set((db.prepare(`PRAGMA table_info("${table.replaceAll("\"", "\"\"")}")`).all() as JsonRecord[]).map((row) => String(row.name)));
 }
 
-function tableExists(db, table) {
+function tableExists(db: DatabaseSync, table: string): boolean {
   return Boolean(db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?").get(table));
 }
 
-function quoteIdent(value) {
+function quoteIdent(value: string): string {
   return `"${String(value).replaceAll("\"", "\"\"")}"`;
 }
 
-function sqlString(value) {
+function sqlString(value: string): string {
   return `'${String(value).replaceAll("'", "''")}'`;
 }
 
-function placeholders(values) {
+function placeholders(values: unknown[]): string {
   return values.map(() => "?").join(", ");
 }
 
-function attachedTableColumns(db, alias, table) {
-  return new Set(db.prepare(`PRAGMA ${quoteIdent(alias)}.table_info(${quoteIdent(table)})`).all().map((row) => row.name));
+function attachedTableColumns(db: DatabaseSync, alias: string, table: string): Set<string> {
+  return new Set((db.prepare(`PRAGMA ${quoteIdent(alias)}.table_info(${quoteIdent(table)})`).all() as JsonRecord[]).map((row) => String(row.name)));
 }
 
-function uniqueStrings(values) {
-  return [...new Set((values ?? []).filter((value) => typeof value === "string" && value))];
+function uniqueStrings(values: unknown): string[] {
+  const array = Array.isArray(values) ? values : [];
+  return [...new Set(array.filter((value) => typeof value === "string" && value))];
 }
 
-function compactThreadSummary(thread) {
+function compactThreadSummary(thread: Thread): Thread {
   return {
     id: thread.id,
     title: thread.title ?? "",
@@ -148,9 +168,9 @@ function compactThreadSummary(thread) {
   };
 }
 
-function buildThreadQuery(flags) {
-  const where = [];
-  const params = {};
+function buildThreadQuery(flags: CliFlags): { sql: string | null; params: JsonRecord | null; empty?: boolean } {
+  const where: string[] = [];
+  const params: JsonRecord = {};
 
   if (!isTruthy(flags.all)) {
     if (isTruthy(flags.archived)) {
@@ -194,31 +214,32 @@ function buildThreadQuery(flags) {
   return { sql, params };
 }
 
-function readThreads(home, flags = {}) {
+function readThreads(home: string, flags: CliFlags = {}): Thread[] {
   const db = openDb(home, { readOnly: true });
   try {
     const { sql, params, empty } = buildThreadQuery(flags);
     if (empty) return [];
-    return db.prepare(sql).all(params);
+    if (!sql) return [];
+    return db.prepare(sql).all((params ?? {}) as any) as Thread[];
   } finally {
     db.close();
   }
 }
 
-function readThreadById(home, id) {
+function readThreadById(home: string, id: string): Thread | undefined {
   const db = openDb(home, { readOnly: true });
   try {
     return db.prepare(`
       SELECT *
       FROM threads
       WHERE id = ?
-    `).get(id);
+    `).get(id) as Thread | undefined;
   } finally {
     db.close();
   }
 }
 
-function readThreadByRef(home, ref) {
+function readThreadByRef(home: string, ref: string): Thread | null {
   const exact = readThreadById(home, ref);
   if (exact) return exact;
   const matches = readThreads(home, { all: true }).filter((thread) => thread.id.startsWith(ref));
@@ -228,17 +249,17 @@ function readThreadByRef(home, ref) {
   return matches[0] ?? null;
 }
 
-async function readJsonIfPresent(filePath, fallback) {
+async function readJsonIfPresent<T>(filePath: string, fallback: T): Promise<any | T> {
   try {
     return JSON.parse(await fs.readFile(filePath, "utf8"));
   } catch (error) {
-    if (error?.code === "ENOENT") return fallback;
+    if ((error as NodeJS.ErrnoException)?.code === "ENOENT") return fallback;
     throw error;
   }
 }
 
-function savedProjectRoots(globalState) {
-  const roots = [];
+function savedProjectRoots(globalState: JsonRecord): string[] {
+  const roots: string[] = [];
   for (const key of ["project-order", "electron-saved-workspace-roots", "active-workspace-roots"]) {
     const value = globalState?.[key];
     if (!Array.isArray(value)) continue;
@@ -246,7 +267,7 @@ function savedProjectRoots(globalState) {
       if (typeof entry === "string" && entry.trim()) roots.push(entry);
     }
   }
-  const seen = new Set();
+  const seen = new Set<string>();
   return roots.filter((root) => {
     const normalized = normalizePathForCompare(root);
     if (!normalized || seen.has(normalized)) return false;
@@ -255,13 +276,13 @@ function savedProjectRoots(globalState) {
   });
 }
 
-function findSavedProjectRoot(value, roots) {
+function findSavedProjectRoot(value: unknown, roots: string[]): string {
   const target = normalizePathForCompare(value);
   if (!target) return "";
   return roots.find((root) => normalizePathForCompare(root) === target) ?? "";
 }
 
-async function getProjects(home) {
+async function getProjects(home: string): Promise<Project[]> {
   const globalState = await readJsonIfPresent(globalStatePath(home), {});
   const savedRoots = savedProjectRoots(globalState);
   const db = openDb(home, { readOnly: true });
@@ -277,8 +298,8 @@ async function getProjects(home) {
       FROM threads
       GROUP BY cwd
       ORDER BY updated_at DESC, cwd
-    `).all();
-    const byPath = new Map();
+    `).all() as JsonRecord[];
+    const byPath = new Map<string | null, Project>();
     for (const root of savedRoots) {
       byPath.set(normalizePathForCompare(root), {
         path: root,
@@ -310,19 +331,19 @@ async function getProjects(home) {
   }
 }
 
-async function getProjectlessThreadIds(home) {
+async function getProjectlessThreadIds(home: string): Promise<string[]> {
   const globalState = await readJsonIfPresent(globalStatePath(home), {});
   return Array.isArray(globalState["projectless-thread-ids"])
     ? globalState["projectless-thread-ids"].filter((id) => typeof id === "string" && id)
     : [];
 }
 
-async function getProjectlessThreads(home, flags = {}) {
+async function getProjectlessThreads(home: string, flags: CliFlags = {}): Promise<Thread[]> {
   const ids = await getProjectlessThreadIds(home);
   return readThreads(home, { ...flags, all: true, ids });
 }
 
-async function readRolloutMeta(filePath) {
+async function readRolloutMeta(filePath: string): Promise<JsonRecord> {
   const handle = await fs.open(filePath, "r");
   try {
     let buffer = Buffer.alloc(64 * 1024);
@@ -347,7 +368,7 @@ async function readRolloutMeta(filePath) {
   }
 }
 
-async function readRolloutFirstRecord(filePath) {
+async function readRolloutFirstRecord(filePath: string): Promise<{ raw: string; record: JsonRecord | null; rest: string }> {
   const raw = await fs.readFile(filePath, "utf8");
   const newlineIndex = raw.indexOf("\n");
   const firstLine = newlineIndex === -1 ? raw : raw.slice(0, newlineIndex);
@@ -358,7 +379,7 @@ async function readRolloutFirstRecord(filePath) {
   return { raw, record: JSON.parse(firstLine), rest };
 }
 
-async function prepareRolloutProviderUpdate(filePath, target) {
+async function prepareRolloutProviderUpdate(filePath: string, target: string | null): Promise<JsonRecord> {
   const { raw, record, rest } = await readRolloutFirstRecord(filePath);
   if (record?.type !== "session_meta" || !record.payload || typeof record.payload !== "object") {
     return { changed: false, before: null, reason: "missing-session-meta" };
@@ -372,18 +393,18 @@ async function prepareRolloutProviderUpdate(filePath, target) {
   return { changed: next !== raw, before, after: target, content: next };
 }
 
-async function scanRollouts(home) {
+async function scanRollouts(home: string): Promise<JsonRecord[]> {
   const roots = [
     path.join(home, "sessions"),
     path.join(home, "archived_sessions")
   ];
-  const files = [];
-  async function walk(dir) {
+  const files: string[] = [];
+  async function walk(dir: string): Promise<void> {
     let entries;
     try {
       entries = await fs.readdir(dir, { withFileTypes: true });
     } catch (error) {
-      if (error?.code === "ENOENT") return;
+      if ((error as NodeJS.ErrnoException)?.code === "ENOENT") return;
       throw error;
     }
     for (const entry of entries) {
@@ -396,22 +417,26 @@ async function scanRollouts(home) {
     }
   }
   for (const root of roots) await walk(root);
-  const metas = [];
+  const metas: JsonRecord[] = [];
   for (const file of files) {
     try {
       const meta = await readRolloutMeta(file);
       metas.push({ path: file, id: meta.id, cwd: meta.cwd, model_provider: meta.model_provider });
     } catch (error) {
-      metas.push({ path: file, error: error.message });
+      metas.push({ path: file, error: error instanceof Error ? error.message : String(error) });
     }
   }
   return metas;
 }
 
-async function collectProviderTagMismatches(home, target, { strictRolloutPaths = false } = {}) {
+async function collectProviderTagMismatches(
+  home: string,
+  target: string,
+  { strictRolloutPaths = false }: { strictRolloutPaths?: boolean } = {}
+): Promise<{ mismatches: JsonRecord[]; groups: JsonRecord[] }> {
   const threads = readThreads(home, { all: true });
-  const mismatches = [];
-  const groups = new Map();
+  const mismatches: JsonRecord[] = [];
+  const groups = new Map<string | null, number>();
   for (const thread of threads) {
     const needsDb = thread.model_provider !== target;
     let rolloutProvider = null;
@@ -429,7 +454,7 @@ async function collectProviderTagMismatches(home, target, { strictRolloutPaths =
             needsRollout = meta.model_provider !== target;
           }
         } catch (error) {
-          rolloutError = error.message;
+          rolloutError = error instanceof Error ? error.message : String(error);
         }
       }
     }
@@ -454,10 +479,13 @@ async function collectProviderTagMismatches(home, target, { strictRolloutPaths =
   };
 }
 
-async function collectProviderConsistencyMismatches(home, { strictRolloutPaths = false } = {}) {
+async function collectProviderConsistencyMismatches(
+  home: string,
+  { strictRolloutPaths = false }: { strictRolloutPaths?: boolean } = {}
+): Promise<{ mismatches: JsonRecord[]; groups: JsonRecord[] }> {
   const threads = readThreads(home, { all: true });
-  const mismatches = [];
-  const groups = new Map();
+  const mismatches: JsonRecord[] = [];
+  const groups = new Map<string, number>();
   for (const thread of threads) {
     if (!thread.rollout_path || !(await pathExists(thread.rollout_path))) continue;
     if (!isInsideDir(home, thread.rollout_path)) {
@@ -494,19 +522,19 @@ async function collectProviderConsistencyMismatches(home, { strictRolloutPaths =
   };
 }
 
-async function getStatus(home) {
+async function getStatus(home: string): Promise<Status> {
   const db = openDb(home, { readOnly: true });
   let integrity = "unknown";
-  let providerRows = [];
-  let totals = {};
+  let providerRows: JsonRecord[] = [];
+  let totals: JsonRecord = {};
   try {
-    integrity = db.prepare("PRAGMA integrity_check").get().integrity_check;
+    integrity = String((db.prepare("PRAGMA integrity_check").get() as JsonRecord).integrity_check);
     providerRows = db.prepare(`
       SELECT model_provider, archived, COUNT(*) AS count
       FROM threads
       GROUP BY model_provider, archived
       ORDER BY archived, model_provider
-    `).all();
+    `).all() as JsonRecord[];
     totals = db.prepare(`
       SELECT
         COUNT(*) AS threads,
@@ -514,7 +542,7 @@ async function getStatus(home) {
         SUM(CASE WHEN archived = 1 THEN 1 ELSE 0 END) AS archived,
         SUM(CASE WHEN has_user_event = 1 THEN 1 ELSE 0 END) AS interactive
       FROM threads
-    `).get();
+    `).get() as JsonRecord;
   } finally {
     db.close();
   }
@@ -526,7 +554,7 @@ async function getStatus(home) {
   const missingRollout = dbThreads.filter((thread) => !fileIds.has(thread.id) || !thread.rollout_path);
   const missingDb = rollouts.filter((file) => file.id && !dbIds.has(file.id));
   const rolloutPathOutsideHome = dbThreads.filter((thread) => thread.rollout_path && !isInsideDir(home, thread.rollout_path));
-  const rolloutProviderCounts = {};
+  const rolloutProviderCounts: Record<string, number> = {};
   for (const rollout of rollouts) {
     const provider = rollout.model_provider || "(missing)";
     rolloutProviderCounts[provider] = (rolloutProviderCounts[provider] ?? 0) + 1;
@@ -561,7 +589,7 @@ async function getStatus(home) {
   };
 }
 
-async function createBackup(home, reason, targetThreads = []) {
+async function createBackup(home: string, reason: string, targetThreads: Thread[] = []): Promise<string> {
   const dir = path.join(backupRoot(home), timestamp());
   await fs.mkdir(path.join(dir, "db"), { recursive: true });
   await fs.mkdir(path.join(dir, "rollouts"), { recursive: true });
@@ -602,7 +630,7 @@ async function createBackup(home, reason, targetThreads = []) {
   return dir;
 }
 
-async function restoreDbFilesFromBackup(home, backupDir) {
+async function restoreDbFilesFromBackup(home: string, backupDir: string): Promise<boolean> {
   const backupDb = path.join(backupDir, "db", DB_NAME);
   if (!(await pathExists(backupDb))) return false;
   for (const sidecar of dbSidecarPaths(home)) {
@@ -618,17 +646,16 @@ async function restoreDbFilesFromBackup(home, backupDir) {
   return true;
 }
 
-async function restoreProviderMetadataFromBackup(home, backupDir, threadIds) {
+async function restoreProviderMetadataFromBackup(home: string, backupDir: string, threadIds: unknown): Promise<{ restoredThreads: number; restoredRows: number }> {
   const ids = uniqueStrings(threadIds);
   if (!ids.length) return { restoredThreads: 0, restoredRows: 0 };
   const backupDb = path.join(backupDir, "db", DB_NAME);
   if (!(await pathExists(backupDb))) return { restoredThreads: 0, restoredRows: 0 };
   const db = openDb(home);
-  let backupAlias = null;
+  const backupAlias = "backup_state";
   try {
     db.exec("PRAGMA busy_timeout = 5000");
     db.exec("PRAGMA foreign_keys = OFF");
-    backupAlias = "backup_state";
     db.exec(`ATTACH DATABASE ${sqlString(backupDb)} AS ${quoteIdent(backupAlias)}`);
     if (!attachedTableColumns(db, backupAlias, "threads").size) {
       return { restoredThreads: 0, restoredRows: 0 };
@@ -704,7 +731,7 @@ async function restoreProviderMetadataFromBackup(home, backupDir, threadIds) {
     throw error;
   } finally {
     try {
-      if (backupAlias) db.exec(`DETACH DATABASE ${quoteIdent(backupAlias)}`);
+      db.exec(`DETACH DATABASE ${quoteIdent(backupAlias)}`);
     } catch {
       // Ignore detach cleanup failures after the main operation is done.
     }
@@ -712,16 +739,15 @@ async function restoreProviderMetadataFromBackup(home, backupDir, threadIds) {
   }
 }
 
-async function restoreThreadProviderTagsFromBackup(home, backupDir, threadIds) {
+async function restoreThreadProviderTagsFromBackup(home: string, backupDir: string, threadIds: unknown): Promise<{ restoredThreads: number; restoredRows: number }> {
   const ids = uniqueStrings(threadIds);
   if (!ids.length) return { restoredThreads: 0, restoredRows: 0 };
   const backupDb = path.join(backupDir, "db", DB_NAME);
   if (!(await pathExists(backupDb))) return { restoredThreads: 0, restoredRows: 0 };
   const db = openDb(home);
-  let backupAlias = null;
+  const backupAlias = "backup_state";
   try {
     db.exec("PRAGMA busy_timeout = 5000");
-    backupAlias = "backup_state";
     db.exec(`ATTACH DATABASE ${sqlString(backupDb)} AS ${quoteIdent(backupAlias)}`);
     const currentColumns = getColumns(db, "threads");
     const backupColumns = attachedTableColumns(db, backupAlias, "threads");
@@ -755,7 +781,7 @@ async function restoreThreadProviderTagsFromBackup(home, backupDir, threadIds) {
     throw error;
   } finally {
     try {
-      if (backupAlias) db.exec(`DETACH DATABASE ${quoteIdent(backupAlias)}`);
+      db.exec(`DETACH DATABASE ${quoteIdent(backupAlias)}`);
     } catch {
       // Ignore detach cleanup failures after the main operation is done.
     }
@@ -763,7 +789,7 @@ async function restoreThreadProviderTagsFromBackup(home, backupDir, threadIds) {
   }
 }
 
-async function alignThreadsToActiveProvider(home, threadIds) {
+async function alignThreadsToActiveProvider(home: string, threadIds: unknown): Promise<{ target: string | null; dbUpdated: number; rolloutUpdated: number }> {
   const target = summarizeConfig(await readTextIfPresent(configPath(home), "") ?? "").modelProvider;
   const ids = uniqueStrings(threadIds);
   if (!target || !ids.length) {
@@ -801,7 +827,7 @@ async function alignThreadsToActiveProvider(home, threadIds) {
   return { target, dbUpdated, rolloutUpdated };
 }
 
-async function restoreMutableFilesFromBackup(home, backupDir) {
+async function restoreMutableFilesFromBackup(home: string, backupDir: string): Promise<void> {
   for (const name of [GLOBAL_STATE, `${GLOBAL_STATE}.bak`, CONFIG_NAME, AUTH_NAME]) {
     const file = path.join(backupDir, name);
     if (await pathExists(file)) {
@@ -810,7 +836,7 @@ async function restoreMutableFilesFromBackup(home, backupDir) {
   }
 }
 
-async function restoreConfigFilesFromBackup(home, backupDir) {
+async function restoreConfigFilesFromBackup(home: string, backupDir: string): Promise<number> {
   let restored = 0;
   for (const name of [CONFIG_NAME, AUTH_NAME]) {
     const file = path.join(backupDir, name);
@@ -822,7 +848,7 @@ async function restoreConfigFilesFromBackup(home, backupDir) {
   return restored;
 }
 
-async function restoreCopiedRolloutsFromBackup(backupDir) {
+async function restoreCopiedRolloutsFromBackup(backupDir: string): Promise<number> {
   const metadata = await readJsonIfPresent(path.join(backupDir, "metadata.json"), null);
   let restored = 0;
   for (const rollout of metadata?.copiedRollouts ?? []) {
@@ -834,7 +860,7 @@ async function restoreCopiedRolloutsFromBackup(backupDir) {
   return restored;
 }
 
-async function restoreProviderTagsInCopiedRolloutsFromBackup(backupDir) {
+async function restoreProviderTagsInCopiedRolloutsFromBackup(backupDir: string): Promise<number> {
   const metadata = await readJsonIfPresent(path.join(backupDir, "metadata.json"), null);
   let restored = 0;
   for (const rollout of metadata?.copiedRollouts ?? []) {
@@ -855,14 +881,14 @@ async function restoreProviderTagsInCopiedRolloutsFromBackup(backupDir) {
   return restored;
 }
 
-async function restoreTrashFilesFromBackup(home, backupDir) {
+async function restoreTrashFilesFromBackup(home: string, backupDir: string): Promise<number> {
   const trashRoot = path.join(backupDir, "trash");
-  async function restoreTrash(dir) {
+  async function restoreTrash(dir: string): Promise<number> {
     let entries;
     try {
       entries = await fs.readdir(dir, { withFileTypes: true });
     } catch (error) {
-      if (error?.code === "ENOENT") return 0;
+      if ((error as NodeJS.ErrnoException)?.code === "ENOENT") return 0;
       throw error;
     }
     let restored = 0;
@@ -883,14 +909,14 @@ async function restoreTrashFilesFromBackup(home, backupDir) {
   return restoreTrash(trashRoot);
 }
 
-async function restoreMutationBackup(home, backupDir) {
+async function restoreMutationBackup(home: string, backupDir: string): Promise<{ restoredRollouts: number }> {
   await restoreDbFilesFromBackup(home, backupDir);
   await restoreMutableFilesFromBackup(home, backupDir);
   const restoredRollouts = await restoreCopiedRolloutsFromBackup(backupDir);
   return { restoredRollouts };
 }
 
-function classifyBackup(reason, metadata = {}) {
+function classifyBackup(reason: unknown, metadata: JsonRecord = {}): BackupClassification {
   const text = String(reason ?? "");
   if (text.startsWith("trash-thread:")) {
     return {
@@ -991,19 +1017,20 @@ function classifyBackup(reason, metadata = {}) {
   };
 }
 
-async function backupFileFlags(backupPath) {
-  const files = {
+async function backupFileFlags(backupPath: string): Promise<BackupFiles> {
+  const files: BackupFiles = {
     db: await pathExists(path.join(backupPath, "db", DB_NAME)),
     config: await pathExists(path.join(backupPath, CONFIG_NAME)),
     auth: await pathExists(path.join(backupPath, AUTH_NAME)),
     globalState: await pathExists(path.join(backupPath, GLOBAL_STATE)),
-    trashManifest: await pathExists(path.join(backupPath, "trash-manifest.json"))
+    trashManifest: await pathExists(path.join(backupPath, "trash-manifest.json")),
+    mutable: false
   };
   files.mutable = files.config || files.auth || files.globalState;
   return files;
 }
 
-function readBackupThreadSummaries(backupPath, threadIds) {
+function readBackupThreadSummaries(backupPath: string, threadIds: unknown): Thread[] {
   const ids = uniqueStrings(threadIds);
   if (!ids.length) return [];
   const backupDb = path.join(backupPath, "db", DB_NAME);
@@ -1017,7 +1044,7 @@ function readBackupThreadSummaries(backupPath, threadIds) {
       FROM threads
       WHERE id IN (${placeholders(ids)})
       ORDER BY updated_at DESC, id DESC
-    `).all(...ids);
+    `).all(...ids) as Thread[];
     return rows.map(compactThreadSummary);
   } catch {
     return [];
@@ -1026,11 +1053,11 @@ function readBackupThreadSummaries(backupPath, threadIds) {
   }
 }
 
-async function readBackupGlobalState(backupPath) {
+async function readBackupGlobalState(backupPath: string): Promise<JsonRecord> {
   return readJsonIfPresent(path.join(backupPath, GLOBAL_STATE), {});
 }
 
-function enrichBackupChatContext(chatSummaries, backupState) {
+function enrichBackupChatContext(chatSummaries: Thread[], backupState: JsonRecord): Thread[] {
   const projectlessIds = new Set(
     Array.isArray(backupState?.["projectless-thread-ids"])
       ? backupState["projectless-thread-ids"].filter((id) => typeof id === "string" && id)
@@ -1055,7 +1082,7 @@ function enrichBackupChatContext(chatSummaries, backupState) {
   });
 }
 
-async function backupSummary(backupPath, name, metadata, stat, home) {
+async function backupSummary(backupPath: string, name: string, metadata: JsonRecord | null, stat: { mtime: Date }, home: string): Promise<BackupSummary> {
   const reason = metadata?.reason ?? "";
   const classification = classifyBackup(reason, metadata ?? {});
   const files = await backupFileFlags(backupPath);
@@ -1089,19 +1116,19 @@ async function backupSummary(backupPath, name, metadata, stat, home) {
   };
 }
 
-async function listBackups(home) {
+async function listBackups(home: string): Promise<BackupSummary[]> {
   let entries = [];
   try {
     entries = await fs.readdir(backupRoot(home), { withFileTypes: true });
   } catch (error) {
-    if (error?.code === "ENOENT") return [];
+      if ((error as NodeJS.ErrnoException)?.code === "ENOENT") return [];
     throw error;
   }
   const backups = [];
   for (const entry of entries) {
     if (!entry.isDirectory()) continue;
     const backupPath = path.join(backupRoot(home), entry.name);
-    let metadata = null;
+    let metadata: JsonRecord | null = null;
     try {
       metadata = JSON.parse(await fs.readFile(path.join(backupPath, "metadata.json"), "utf8"));
     } catch {
@@ -1113,8 +1140,8 @@ async function listBackups(home) {
   return backups.sort((left, right) => right.createdAt.localeCompare(left.createdAt));
 }
 
-async function resolveProjectRef(home, ref) {
-  if (!String(ref).startsWith("#")) return ref;
+async function resolveProjectRef(home: string, ref: unknown): Promise<string | undefined> {
+  if (!String(ref).startsWith("#")) return typeof ref === "string" ? ref : undefined;
   const index = Number.parseInt(String(ref).slice(1), 10);
   if (!Number.isInteger(index) || index < 1) {
     throw new Error(`Invalid project number: ${ref}`);
@@ -1127,8 +1154,8 @@ async function resolveProjectRef(home, ref) {
   return project.path;
 }
 
-async function resolveBackupRef(home, ref) {
-  if (!String(ref).startsWith("#")) return ref;
+async function resolveBackupRef(home: string, ref: unknown): Promise<string | undefined> {
+  if (!String(ref).startsWith("#")) return typeof ref === "string" ? ref : undefined;
   const index = Number.parseInt(String(ref).slice(1), 10);
   if (!Number.isInteger(index) || index < 1) {
     throw new Error(`Invalid backup number: ${ref}`);
@@ -1141,7 +1168,7 @@ async function resolveBackupRef(home, ref) {
   return backup.path;
 }
 
-function removeThreadRefsFromGlobalState(state, ids) {
+function removeThreadRefsFromGlobalState(state: JsonRecord, ids: string[]): void {
   const idSet = new Set(ids);
   const arrayKeys = ["projectless-thread-ids", "pinned-thread-ids"];
   for (const key of arrayKeys) {
@@ -1172,7 +1199,7 @@ function removeThreadRefsFromGlobalState(state, ids) {
   }
 }
 
-function mergeThreadRefsIntoGlobalState(targetState, backupState, ids) {
+function mergeThreadRefsIntoGlobalState(targetState: JsonRecord, backupState: JsonRecord, ids: unknown): { arrays: number; objects: number } {
   const idSet = new Set(uniqueStrings(ids));
   if (!idSet.size) return { arrays: 0, objects: 0 };
   let arrays = 0;
@@ -1197,7 +1224,6 @@ function mergeThreadRefsIntoGlobalState(targetState, backupState, ids) {
     "thread-projectless-output-directories"
   ];
   const backupPersisted = backupState?.["electron-persisted-atom-state"];
-  const targetPersisted = targetState["electron-persisted-atom-state"];
   if (backupPersisted && typeof backupPersisted === "object") {
     if (!targetState["electron-persisted-atom-state"] || typeof targetState["electron-persisted-atom-state"] !== "object") {
       targetState["electron-persisted-atom-state"] = {};
@@ -1238,7 +1264,7 @@ function mergeThreadRefsIntoGlobalState(targetState, backupState, ids) {
   return { arrays, objects };
 }
 
-function mergeProjectRefsIntoGlobalState(targetState, backupState, projectPath) {
+function mergeProjectRefsIntoGlobalState(targetState: JsonRecord, backupState: JsonRecord, projectPath: unknown): { projects: number } {
   const target = normalizePathForCompare(projectPath);
   if (!target) return { projects: 0 };
   let projects = 0;
@@ -1261,7 +1287,7 @@ function mergeProjectRefsIntoGlobalState(targetState, backupState, projectPath) 
   return { projects };
 }
 
-async function restoreThreadRefsFromBackup(home, backupDir, threadIds, projectPath = null) {
+async function restoreThreadRefsFromBackup(home: string, backupDir: string, threadIds: unknown, projectPath: string | null = null): Promise<JsonRecord> {
   const backupState = await readJsonIfPresent(path.join(backupDir, GLOBAL_STATE), null);
   if (!backupState) return { arrays: 0, objects: 0, projects: 0, restored: false };
   const state = await readJsonIfPresent(globalStatePath(home), {});
@@ -1271,7 +1297,7 @@ async function restoreThreadRefsFromBackup(home, backupDir, threadIds, projectPa
   return { ...merged, ...projectRefs, restored: true };
 }
 
-function removeProjectRootFromGlobalState(state, projectPath) {
+function removeProjectRootFromGlobalState(state: JsonRecord, projectPath: string): number {
   const target = normalizePathForCompare(projectPath);
   let removed = 0;
   for (const key of ["electron-saved-workspace-roots", "project-order", "active-workspace-roots"]) {
@@ -1283,7 +1309,7 @@ function removeProjectRootFromGlobalState(state, projectPath) {
   return removed;
 }
 
-function countProjectRootRefs(state, projectPath) {
+function countProjectRootRefs(state: JsonRecord, projectPath: string): number {
   const target = normalizePathForCompare(projectPath);
   let count = 0;
   for (const key of ["electron-saved-workspace-roots", "project-order", "active-workspace-roots"]) {
@@ -1293,7 +1319,7 @@ function countProjectRootRefs(state, projectPath) {
   return count;
 }
 
-function assertThreadRolloutsInsideHome(home, threads) {
+function assertThreadRolloutsInsideHome(home: string, threads: Thread[]): void {
   for (const thread of threads) {
     if (thread.rollout_path) {
       relativeInside(home, thread.rollout_path);
@@ -1301,11 +1327,15 @@ function assertThreadRolloutsInsideHome(home, threads) {
   }
 }
 
-async function writeGlobalState(home, state) {
+async function writeGlobalState(home: string, state: JsonRecord): Promise<void> {
   await fs.writeFile(globalStatePath(home), `${JSON.stringify(state, null, 2)}\n`);
 }
 
-async function trashThreads(home, threads, { execute, reason, backupDir: existingBackupDir = null }) {
+async function trashThreads(
+  home: string,
+  threads: Thread[],
+  { execute, reason, backupDir: existingBackupDir = null }: { execute: boolean; reason: string; backupDir?: string | null }
+): Promise<JsonRecord> {
   if (!threads.length) {
     return { dryRun: !execute, backupDir: null, trashed: 0, threads: [] };
   }
@@ -1370,7 +1400,7 @@ async function trashThreads(home, threads, { execute, reason, backupDir: existin
   }
 }
 
-async function deleteProject(home, projectPath, { execute }) {
+async function deleteProject(home: string, projectPath: string, { execute }: { execute: boolean }): Promise<JsonRecord> {
   const normalizedProject = path.resolve(projectPath);
   const target = normalizePathForCompare(normalizedProject);
   const threads = readThreads(home, { all: true }).filter((thread) => normalizePathForCompare(thread.cwd) === target);
@@ -1402,7 +1432,7 @@ async function deleteProject(home, projectPath, { execute }) {
   const backupDir = await createBackup(home, `delete-project:${normalizedProject}`, threads);
   const removedProjectRefs = removeProjectRootFromGlobalState(state, normalizedProject);
   await writeGlobalState(home, state);
-  let trashResult = { trashed: 0, moved: [] };
+  let trashResult: JsonRecord = { trashed: 0, moved: [] };
   if (threads.length) {
     trashResult = await trashThreads(home, threads, {
       execute: true,
@@ -1422,7 +1452,7 @@ async function deleteProject(home, projectPath, { execute }) {
   };
 }
 
-async function restoreBackup(home, backupDir, execute, scope) {
+async function restoreBackup(home: string, backupDir: string, execute: boolean, scope?: BackupScope): Promise<JsonRecord> {
   const source = path.resolve(backupDir);
   const metadata = await readJsonIfPresent(path.join(source, "metadata.json"), null);
   if (!metadata) {
@@ -1431,7 +1461,7 @@ async function restoreBackup(home, backupDir, execute, scope) {
   const stat = await fs.stat(source);
   const backup = await backupSummary(source, path.basename(source), metadata, stat, home);
   const defaultScope = backup.scopes[0] ?? "config";
-  const safeScope = backup.scopes.includes(scope) ? scope : defaultScope;
+  const safeScope = scope && backup.scopes.includes(scope) ? scope : defaultScope;
   if (!execute) {
     return { dryRun: true, backupDir: source, metadata, backup, scope: safeScope };
   }
@@ -1441,8 +1471,8 @@ async function restoreBackup(home, backupDir, execute, scope) {
   let restoredMutable = false;
   let restoredConfigFiles = 0;
   let restoredMetadata = { restoredThreads: 0, restoredRows: 0 };
-  let alignedProvider = { target: null, dbUpdated: 0, rolloutUpdated: 0 };
-  let restoredThreadRefs = { arrays: 0, objects: 0, restored: false };
+  let alignedProvider: { target: string | null; dbUpdated: number; rolloutUpdated: number } = { target: null, dbUpdated: 0, rolloutUpdated: 0 };
+  let restoredThreadRefs: JsonRecord = { arrays: 0, objects: 0, restored: false };
   let restoredFiles = 0;
   try {
     if (safeScope === "config") {
@@ -1477,1028 +1507,30 @@ async function restoreBackup(home, backupDir, execute, scope) {
   };
 }
 
-// --- Config / provider switching ----------------------------------------
-
-function configPath(home) {
-  return path.join(home, CONFIG_NAME);
-}
-
-function authPath(home) {
-  return path.join(home, AUTH_NAME);
-}
-
-function profileDir(home) {
-  return path.join(home, PROFILE_DIR);
-}
-
-function profileIndexPath(home) {
-  return path.join(profileDir(home), PROFILE_INDEX);
-}
-
-async function readTextIfPresent(filePath, fallback = null) {
-  try {
-    return await fs.readFile(filePath, "utf8");
-  } catch (error) {
-    if (error?.code === "ENOENT") return fallback;
-    throw error;
-  }
-}
-
-async function writeTextIfChanged(filePath, content) {
-  const current = await readTextIfPresent(filePath, null);
-  if (current === content) return false;
-  await fs.writeFile(filePath, content);
-  return true;
-}
-
-function escapeRegex(value) {
-  return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
-function maskToken(value) {
-  const text = String(value ?? "");
-  if (text.length <= 12) return text ? "****" : "";
-  return `${text.slice(0, 7)}…${text.slice(-4)}`;
-}
-
-function parseTomlScalar(raw) {
-  const value = String(raw).trim();
-  if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
-    return value.slice(1, -1);
-  }
-  if (value === "true") return true;
-  if (value === "false") return false;
-  if (/^-?\d+$/.test(value)) return Number.parseInt(value, 10);
-  return value;
-}
-
-function formatTomlValue(value) {
-  if (typeof value === "boolean") return value ? "true" : "false";
-  if (typeof value === "number") return String(value);
-  return JSON.stringify(String(value));
-}
-
-function isTableHeader(line) {
-  return /^\s*\[/.test(line);
-}
-
-function tableHeaderName(line) {
-  const match = line.match(/^\s*\[([^\]]+)\]\s*$/);
-  return match ? match[1].trim() : null;
-}
-
-function providerKeyFromHeader(header) {
-  const match = header.match(/^model_providers\.(.+)$/);
-  if (!match) return null;
-  let key = match[1].trim();
-  if (key.startsWith('"') && key.endsWith('"')) key = key.slice(1, -1);
-  return key;
-}
-
-function topLevelRange(lines) {
-  for (let i = 0; i < lines.length; i += 1) {
-    if (isTableHeader(lines[i])) return [0, i];
-  }
-  return [0, lines.length];
-}
-
-function providerRange(lines, key) {
-  for (let i = 0; i < lines.length; i += 1) {
-    const header = tableHeaderName(lines[i]);
-    if (header && providerKeyFromHeader(header) === key) {
-      let end = lines.length;
-      for (let j = i + 1; j < lines.length; j += 1) {
-        if (isTableHeader(lines[j])) {
-          end = j;
-          break;
-        }
-      }
-      return [i, end];
-    }
-  }
-  return null;
-}
-
-function readScalarInRange(lines, start, end, key) {
-  const re = new RegExp(`^\\s*${escapeRegex(key)}\\s*=\\s*(.+?)\\s*$`);
-  for (let i = start; i < end; i += 1) {
-    const match = lines[i].match(re);
-    if (match) return parseTomlScalar(match[1]);
-  }
-  return undefined;
-}
-
-function setScalarInRange(lines, start, end, key, value, insertAt) {
-  const re = new RegExp(`^(\\s*)${escapeRegex(key)}\\s*=`);
-  for (let i = start; i < end; i += 1) {
-    const match = lines[i].match(re);
-    if (match) {
-      if (value === null) {
-        lines.splice(i, 1);
-        return { changed: true, removed: true };
-      }
-      const next = `${match[1]}${key} = ${formatTomlValue(value)}`;
-      const changed = next !== lines[i];
-      lines[i] = next;
-      return { changed };
-    }
-  }
-  if (value === null) return { changed: false };
-  lines.splice(insertAt ?? end, 0, `${key} = ${formatTomlValue(value)}`);
-  return { changed: true, inserted: true };
-}
-
-function setOfficialProviderInText(text) {
-  const lines = text ? text.split("\n") : [];
-  let [, topEnd] = topLevelRange(lines);
-  let result = setScalarInRange(lines, 0, topEnd, "model_provider", "openai", topEnd);
-  if (result.inserted) topEnd += 1;
-  if (readScalarInRange(lines, 0, topEnd, "model") === undefined) {
-    result = setScalarInRange(lines, 0, topEnd, "model", "gpt-5.5", topEnd);
-    if (result.inserted) topEnd += 1;
-  }
-  [, topEnd] = topLevelRange(lines);
-  setScalarInRange(lines, 0, topEnd, "experimental_bearer_token", null, topEnd);
-  const next = lines.join("\n");
-  return next.endsWith("\n") ? next : `${next}\n`;
-}
-
-function summarizeConfig(text) {
-  const lines = text.split("\n");
-  const [topStart, topEnd] = topLevelRange(lines);
-  const model = readScalarInRange(lines, topStart, topEnd, "model");
-  const configuredModelProvider = readScalarInRange(lines, topStart, topEnd, "model_provider");
-  const modelProvider = configuredModelProvider ?? "openai";
-  const bearer = readScalarInRange(lines, topStart, topEnd, "experimental_bearer_token");
-  let provider = null;
-  if (modelProvider) {
-    const range = providerRange(lines, modelProvider);
-    if (range) {
-      const [ps, pe] = range;
-      provider = {
-        key: modelProvider,
-        name: readScalarInRange(lines, ps, pe, "name") ?? null,
-        baseUrl: readScalarInRange(lines, ps, pe, "base_url") ?? null,
-        wireApi: readScalarInRange(lines, ps, pe, "wire_api") ?? null,
-        requiresOpenaiAuth: readScalarInRange(lines, ps, pe, "requires_openai_auth") ?? null,
-        envKey: readScalarInRange(lines, ps, pe, "env_key") ?? null
-      };
-    }
-  }
-  return {
-    model: model ?? null,
-    modelProvider,
-    configuredModelProvider: configuredModelProvider ?? null,
-    provider,
-    bearer: bearer
-      ? { present: true, masked: maskToken(bearer), value: String(bearer) }
-      : { present: false, masked: "", value: "" }
-  };
-}
-
-function providerKind(provider, modelProvider) {
-  // Any explicit [model_providers.<id>] block is a custom provider, even if it reuses a built-in id.
-  if (provider) return "third-party";
-  // No custom block: a built-in id (e.g. openai) means the official, auth-based provider.
-  if (modelProvider && BUILTIN_PROVIDER_IDS.has(modelProvider)) return "official";
-  return "unknown";
-}
-
-function isReservedProviderId(id) {
-  return BUILTIN_PROVIDER_IDS.has(id);
-}
-
-function findReservedProviderBlocks(text) {
-  const found = [];
-  for (const id of BUILTIN_PROVIDER_IDS) {
-    const re = new RegExp(`^\\s*\\[model_providers\\.(?:"${escapeRegex(id)}"|${escapeRegex(id)})\\]`, "m");
-    if (re.test(text)) found.push(id);
-  }
-  return found;
-}
-
-function assertNoReservedProviderBlock(text) {
-  for (const id of BUILTIN_PROVIDER_IDS) {
-    const re = new RegExp(`^\\s*\\[model_providers\\.(?:"${escapeRegex(id)}"|${escapeRegex(id)})\\]`, "m");
-    if (re.test(text)) {
-      throw new Error(`config.toml defines [model_providers.${id}], but "${id}" is a reserved built-in provider that cannot be overridden. Rename it to a custom id.`);
-    }
-  }
-}
-
-function providerIdFromConfigText(text) {
-  const summary = summarizeConfig(text);
-  const providerId = summary.configuredModelProvider;
-  if (!providerId) {
-    throw new Error("config.toml must set model_provider for a custom provider.");
-  }
-  if (!/^[A-Za-z0-9._-]+$/.test(providerId)) {
-    throw new Error("model_provider may only contain letters, numbers, dot, underscore, and hyphen");
-  }
-  if (isReservedProviderId(providerId)) {
-    throw new Error(`"${providerId}" is a reserved built-in provider. Use a custom id like "openai-custom".`);
-  }
-  if (!summary.provider) {
-    throw new Error(`config.toml must define [model_providers.${providerId}].`);
-  }
-  return providerId;
-}
-
-function assertCustomProviderConfig(text) {
-  providerIdFromConfigText(text);
-}
-
-
-async function readAuthSummary(home) {
-  const auth = await readJsonIfPresent(authPath(home), null);
-  if (!auth) return { exists: false, mode: null, hasApiKey: false, apiKey: null };
-  return {
-    exists: true,
-    mode: auth.auth_mode ?? null,
-    hasApiKey: Boolean(auth.OPENAI_API_KEY),
-    apiKey: auth.OPENAI_API_KEY ?? null
-  };
-}
-
-function isOfficialAuthText(raw) {
-  if (!raw) return false;
-  try {
-    const auth = JSON.parse(raw);
-    return Boolean(auth?.auth_mode) && !auth.OPENAI_API_KEY;
-  } catch {
-    return false;
-  }
-}
-
-async function readCurrentOfficialAuthText(home) {
-  const authText = await readTextIfPresent(authPath(home), null);
-  return isOfficialAuthText(authText) ? authText : null;
-}
-
-function officialProfileConfigPath(home) {
-  return path.join(profileDir(home), `${OFFICIAL_PROFILE_ID}.toml`);
-}
-
-function officialProfileAuthPath(home) {
-  return path.join(profileDir(home), `${OFFICIAL_PROFILE_ID}.auth.json`);
-}
-
-async function profileConfigText(home, profileId) {
-  return readTextIfPresent(path.join(profileDir(home), `${profileId}.toml`), null);
-}
-
-async function profileProviderId(home, entry) {
-  if (entry.providerId) return entry.providerId;
-  const configText = await profileConfigText(home, entry.id);
-  if (configText === null) return null;
-  return summarizeConfig(configText).modelProvider ?? null;
-}
-
-async function removeProfileSnapshotFiles(home, profileId) {
-  await fs.rm(path.join(profileDir(home), `${profileId}.toml`), { force: true });
-  await fs.rm(path.join(profileDir(home), `${profileId}.auth.json`), { force: true });
-}
-
-async function cleanupAutoDetectedThirdPartyProfiles(home) {
-  const profiles = await readProfileIndex(home);
-  const stale = profiles.filter((profile) => (
-    profile.autoDetected === true
-    && profile.autoManaged !== true
-    && profile.id !== OFFICIAL_PROFILE_ID
-  ));
-  if (!stale.length) return { removed: 0, ids: [] };
-  for (const profile of stale) {
-    await removeProfileSnapshotFiles(home, profile.id);
-  }
-  await writeProfileIndex(home, profiles.filter((profile) => !stale.some((item) => item.id === profile.id)));
-  return { removed: stale.length, ids: stale.map((profile) => profile.id) };
-}
-
-function upsertProfile(profiles, entry) {
-  const existing = profiles.find((profile) => profile.id === entry.id);
-  return existing
-    ? profiles.map((profile) => (profile.id === entry.id ? { ...profile, ...entry, createdAt: profile.createdAt ?? entry.createdAt } : profile))
-    : [...profiles, entry];
-}
-
-async function ensureOfficialProviderSnapshot(home) {
-  const configText = await readTextIfPresent(configPath(home), null);
-  const authText = await readTextIfPresent(authPath(home), null);
-  if (configText === null || authText === null || !isOfficialAuthText(authText)) {
-    return { saved: false, reason: "not-official-auth" };
-  }
-
-  const summary = summarizeConfig(configText);
-  if (providerKind(summary.provider, summary.modelProvider) !== "official") {
-    return { saved: false, reason: "not-official-config" };
-  }
-
-  await fs.mkdir(profileDir(home), { recursive: true });
-  const wroteConfig = await writeTextIfChanged(officialProfileConfigPath(home), configText);
-  const wroteAuth = await writeTextIfChanged(officialProfileAuthPath(home), authText);
-  const profiles = await readProfileIndex(home);
-  const now = new Date().toISOString();
-  const existing = profiles.find((profile) => profile.id === OFFICIAL_PROFILE_ID);
-  const nextEntry = {
-    ...(existing ?? {}),
-    id: OFFICIAL_PROFILE_ID,
-    label: OFFICIAL_PROFILE_LABEL,
-    note: "Automatically refreshed while current Codex auth is OpenAI Official.",
-    kind: "official",
-    hasAuth: true,
-    autoManaged: true,
-    updatedAt: now,
-    createdAt: existing?.createdAt ?? now
-  };
-  await writeProfileIndex(home, upsertProfile(profiles, nextEntry));
-  return {
-    saved: wroteConfig || wroteAuth || !existing,
-    profile: nextEntry,
-    wroteConfig,
-    wroteAuth
-  };
-}
-
-async function reconcileCurrentProvider(home) {
-  const thirdPartyCleanup = await cleanupAutoDetectedThirdPartyProfiles(home);
-  const configText = await readTextIfPresent(configPath(home), "") ?? "";
-  const authText = await readTextIfPresent(authPath(home), null);
-  const summary = summarizeConfig(configText);
-  const kind = providerKind(summary.provider, summary.modelProvider);
-  if (kind === "official" && isOfficialAuthText(authText)) {
-    return { kind, official: await ensureOfficialProviderSnapshot(home), thirdParty: thirdPartyCleanup };
-  }
-  if (kind === "third-party") {
-    return {
-      kind,
-      official: { saved: false, reason: "not-official-config" },
-      thirdParty: thirdPartyCleanup
-    };
-  }
-  return {
-    kind,
-    official: { saved: false, reason: "not-official" },
-    thirdParty: thirdPartyCleanup
-  };
-}
-
-async function findOfficialAuthSnapshot(home) {
-  const profiles = await readProfileIndex(home);
-  const sorted = [...profiles].sort((left, right) => {
-    if (left.id === OFFICIAL_PROFILE_ID) return -1;
-    if (right.id === OFFICIAL_PROFILE_ID) return 1;
-    return String(right.createdAt).localeCompare(String(left.createdAt));
-  });
-  for (const entry of sorted) {
-    if (entry.hasAuth !== true) continue;
-    const configSnapshot = await readTextIfPresent(path.join(profileDir(home), `${entry.id}.toml`), null);
-    const authSnapshot = await readTextIfPresent(path.join(profileDir(home), `${entry.id}.auth.json`), null);
-    if (configSnapshot === null || authSnapshot === null || !isOfficialAuthText(authSnapshot)) continue;
-    const summary = summarizeConfig(configSnapshot);
-    if (providerKind(summary.provider, summary.modelProvider) !== "official") continue;
-    return { profile: entry, configText: configSnapshot, authText: authSnapshot };
-  }
-  return null;
-}
-
-async function findOfficialBackupSnapshot(home) {
-  const backups = await listBackups(home);
-  for (const backup of backups) {
-    const configText = await readTextIfPresent(path.join(backup.path, CONFIG_NAME), null);
-    if (configText === null) continue;
-    const summary = summarizeConfig(configText);
-    if (providerKind(summary.provider, summary.modelProvider) !== "official") continue;
-    const authText = await readTextIfPresent(path.join(backup.path, AUTH_NAME), null);
-    return {
-      backup,
-      configText,
-      authText,
-      hasOfficialAuth: isOfficialAuthText(authText)
-    };
-  }
-  return null;
-}
-
-function officialProfileInfo(snapshot) {
-  return {
-    available: true,
-    source: "profile",
-    profileId: snapshot.profile.id,
-    label: snapshot.profile.label ?? snapshot.profile.id,
-    createdAt: snapshot.profile.createdAt ?? null,
-    updatedAt: snapshot.profile.updatedAt ?? null,
-    autoManaged: snapshot.profile.autoManaged === true,
-    hasAuth: true,
-    hasOfficialAuth: true
-  };
-}
-
-function officialBackupInfo(snapshot, currentOfficialAuthText = null) {
-  const authSource = snapshot.authText !== null ? "backup" : currentOfficialAuthText ? "current" : "missing";
-  return {
-    available: true,
-    source: "backup",
-    profileId: null,
-    backupDir: snapshot.backup.path,
-    label: snapshot.backup.reason || snapshot.backup.name,
-    createdAt: snapshot.backup.createdAt,
-    hasAuth: authSource !== "missing",
-    hasOfficialAuth: snapshot.hasOfficialAuth || authSource === "current",
-    authSource
-  };
-}
-
-async function resolveOfficialProviderSource(home) {
-  const profileSnapshot = await findOfficialAuthSnapshot(home);
-  if (profileSnapshot) {
-    return {
-      ...officialProfileInfo(profileSnapshot),
-      configText: profileSnapshot.configText,
-      authText: profileSnapshot.authText,
-      authSource: "profile"
-    };
-  }
-
-  const backupSnapshot = await findOfficialBackupSnapshot(home);
-  if (backupSnapshot) {
-    const currentAuthText = await readCurrentOfficialAuthText(home);
-    return {
-      ...officialBackupInfo(backupSnapshot, currentAuthText),
-      configText: backupSnapshot.configText,
-      authText: backupSnapshot.authText ?? currentAuthText
-    };
-  }
-
-  const currentAuthText = await readCurrentOfficialAuthText(home);
-  if (currentAuthText) {
-    return {
-      available: true,
-      source: "current",
-      label: "Current OpenAI login",
-      hasAuth: true,
-      hasOfficialAuth: true,
-      authSource: "current",
-      configText: setOfficialProviderInText(await readTextIfPresent(configPath(home), "") ?? ""),
-      authText: currentAuthText
-    };
-  }
-
-  return { available: false, source: "missing", hasAuth: false, hasOfficialAuth: false, authText: null, configText: null };
-}
-
-function publicOfficialSourceInfo(source) {
-  const { configText, authText, ...info } = source;
-  return info;
-}
-
-async function getOfficialProviderFiles(home) {
-  await reconcileCurrentProvider(home);
-  const source = await resolveOfficialProviderSource(home);
-  return {
-    ...source,
-    config: source.configText ?? "",
-    auth: source.authText ?? "",
-    missing: !source.available
-  };
-}
-
-function configFilePath(home, file) {
-  if (file === "auth") return authPath(home);
-  if (file === "config" || file === undefined) return configPath(home);
-  throw new Error(`Unknown file "${file}"; use config or auth`);
-}
-
-async function readConfigFile(home, file) {
-  const filePath = configFilePath(home, file);
-  const raw = await readTextIfPresent(filePath, null);
-  return { file: file ?? "config", path: filePath, exists: raw !== null, raw: raw ?? "" };
-}
-
-async function writeConfigFile(home, file, content, { execute }) {
-  const filePath = configFilePath(home, file);
-  if (file === "auth") {
-    try {
-      JSON.parse(content);
-    } catch (error) {
-      throw new Error(`Refusing to save: auth.json is not valid JSON (${error.message})`);
-    }
-  }
-  if (file !== "auth") {
-    assertNoReservedProviderBlock(content);
-  }
-  if (!execute) {
-    return { dryRun: true, file: file ?? "config", path: filePath, bytes: Buffer.byteLength(content, "utf8") };
-  }
-  const backupDir = await createBackup(home, `config-file-write:${file ?? "config"}`, []);
-  await fs.writeFile(filePath, content);
-  return { dryRun: false, file: file ?? "config", path: filePath, backupDir };
-}
-
-function assertProfileId(value) {
-  const id = String(value ?? "");
-  if (!/^[A-Za-z0-9._-]+$/.test(id)) {
-    throw new Error(`Invalid profile id: ${id || "(empty)"}`);
-  }
-  return id;
-}
-
-async function requireProfile(home, profileId) {
-  const id = assertProfileId(profileId);
-  const entry = (await readProfileIndex(home)).find((profile) => profile.id === id);
-  if (!entry) throw new Error(`Profile not found: ${id}`);
-  return entry;
-}
-
-async function readProfileFile(home, profileId, file = "config") {
-  const entry = await requireProfile(home, profileId);
-  const safeFile = file === "auth" ? "auth" : "config";
-  const filePath = path.join(profileDir(home), `${entry.id}.${safeFile === "auth" ? "auth.json" : "toml"}`);
-  const raw = await readTextIfPresent(filePath, null);
-  return { profileId: entry.id, file: safeFile, path: filePath, exists: raw !== null, raw: raw ?? "" };
-}
-
-async function writeProfileFile(home, profileId, file, content, { execute }) {
-  const entry = await requireProfile(home, profileId);
-  const safeFile = file === "auth" ? "auth" : "config";
-  if (typeof content !== "string") throw new Error("content is required");
-  if (safeFile === "auth") {
-    try {
-      JSON.parse(content);
-    } catch (error) {
-      throw new Error(`Invalid JSON: ${error.message}`);
-    }
-  } else {
-    assertNoReservedProviderBlock(content);
-    if (entry.kind !== "official") {
-      assertCustomProviderConfig(content);
-    }
-  }
-  const filePath = path.join(profileDir(home), `${entry.id}.${safeFile === "auth" ? "auth.json" : "toml"}`);
-  if (!execute) {
-    return { dryRun: true, file: safeFile, path: filePath, bytes: Buffer.byteLength(content, "utf8") };
-  }
-  await fs.writeFile(filePath, content);
-  if (safeFile === "config") {
-    const summary = summarizeConfig(content);
-    const profiles = await readProfileIndex(home);
-    await writeProfileIndex(home, profiles.map((profile) => (
-      profile.id === entry.id ? { ...profile, providerId: summary.modelProvider, kind: providerKind(summary.provider, summary.modelProvider) } : profile
-    )));
-  } else if (entry.hasAuth !== true) {
-    const profiles = await readProfileIndex(home);
-    await writeProfileIndex(home, profiles.map((profile) => (
-      profile.id === entry.id ? { ...profile, hasAuth: true } : profile
-    )));
-  }
-  return { dryRun: false, file: safeFile, path: filePath, saved: true };
-}
-
-async function readProfileIndex(home) {
-  const index = await readJsonIfPresent(profileIndexPath(home), null);
-  return Array.isArray(index?.profiles) ? index.profiles : [];
-}
-
-async function writeProfileIndex(home, profiles) {
-  await fs.mkdir(profileDir(home), { recursive: true });
-  await fs.writeFile(profileIndexPath(home), `${JSON.stringify({ version: 1, profiles }, null, 2)}\n`);
-}
-
-async function listProfiles(home, currentText) {
-  const entries = await readProfileIndex(home);
-  const currentProviderId = summarizeConfig(currentText).modelProvider;
-  const visible = [];
-  const seenProviderIds = new Set();
-  for (const entry of entries) {
-    if (entry.autoManaged === true && entry.id === OFFICIAL_PROFILE_ID) continue;
-    const providerId = await profileProviderId(home, entry);
-    if (providerId) {
-      const key = `${entry.kind ?? "custom"}:${providerId}`;
-      const existingIndex = visible.findIndex((profile) => profile.key === key);
-      if (existingIndex !== -1) {
-        const previous = visible[existingIndex].entry;
-        if (previous.autoDetected === true && entry.autoDetected !== true) {
-          visible[existingIndex] = { key, entry, providerId };
-        }
-        continue;
-      }
-      if (entry.autoDetected === true && seenProviderIds.has(providerId)) continue;
-      seenProviderIds.add(providerId);
-      visible.push({ key, entry, providerId });
-    } else {
-      visible.push({ key: `missing:${entry.id}`, entry, providerId: null });
-    }
-  }
-  const profiles = [];
-  for (const { entry, providerId } of visible) {
-    const file = path.join(profileDir(home), `${entry.id}.toml`);
-    const snapshot = await readTextIfPresent(file, null);
-    profiles.push({
-      id: entry.id,
-      label: entry.label ?? entry.id,
-      note: entry.note ?? "",
-      kind: entry.kind ?? "custom",
-      createdAt: entry.createdAt ?? null,
-      updatedAt: entry.updatedAt ?? null,
-      autoDetected: entry.autoDetected === true,
-      providerId,
-      missing: snapshot === null,
-      hasAuth: entry.hasAuth === true,
-      active: providerId !== null && providerId === currentProviderId
-    });
-  }
-  return profiles.sort((left, right) => String(right.createdAt).localeCompare(String(left.createdAt)));
-}
-
-async function getConfigOverview(home) {
-  const reconciled = await reconcileCurrentProvider(home);
-  const text = await readTextIfPresent(configPath(home), "") ?? "";
-  const summary = summarizeConfig(text);
-  const authSummary = await readAuthSummary(home);
-  const officialSource = await resolveOfficialProviderSource(home);
-  const officialInfo = publicOfficialSourceInfo(officialSource);
-  return {
-    codexHome: home,
-    configPath: configPath(home),
-    exists: text.length > 0,
-    raw: text,
-    ...summary,
-    kind: providerKind(summary.provider, summary.modelProvider),
-    reservedBlocks: findReservedProviderBlocks(text),
-    auth: authSummary,
-    officialAuthSnapshot: officialInfo,
-    autoOfficialSnapshot: reconciled.official,
-    autoThirdPartyProfile: reconciled.thirdParty,
-    profiles: await listProfiles(home, text)
-  };
-}
-
-async function saveProfile(home, { label, note = "", kind }) {
-  if (!label) throw new Error("Profile label is required");
-  const text = await readTextIfPresent(configPath(home), null);
-  if (text === null) throw new Error("No config.toml found to capture");
-  const authText = await readTextIfPresent(authPath(home), null);
-  const id = `${timestamp()}-${Math.random().toString(36).slice(2, 6)}`;
-  await fs.mkdir(profileDir(home), { recursive: true });
-  await fs.writeFile(path.join(profileDir(home), `${id}.toml`), text);
-  const hasAuth = authText !== null;
-  if (hasAuth) {
-    await fs.writeFile(path.join(profileDir(home), `${id}.auth.json`), authText);
-  }
-  const summary = summarizeConfig(text);
-  const profiles = await readProfileIndex(home);
-  const entry = {
-    id,
-    label,
-    note,
-    kind: kind ?? providerKind(summary.provider, summary.modelProvider),
-    providerId: summary.modelProvider,
-    hasAuth,
-    createdAt: new Date().toISOString()
-  };
-  profiles.push(entry);
-  await writeProfileIndex(home, profiles);
-  return { saved: true, profile: entry };
-}
-
-async function createProvider(home, {
-  label,
-  configText,
-  authText,
-  switch: shouldSwitch = false
-}) {
-  const safeLabel = String(label ?? "").trim();
-  if (!safeLabel) throw new Error("label is required");
-
-  if (typeof configText !== "string" || !configText.trim()) {
-    throw new Error("configText is required");
-  }
-  assertNoReservedProviderBlock(configText);
-  providerIdFromConfigText(configText);
-  const normalizedConfigText = configText.endsWith("\n") ? configText : `${configText}\n`;
-
-  let normalizedAuthText = null;
-  if (typeof authText === "string" && authText.trim()) {
-    try {
-      JSON.parse(authText);
-    } catch (error) {
-      throw new Error(`authText is not valid JSON (${error.message})`);
-    }
-    normalizedAuthText = authText.endsWith("\n") ? authText : `${authText}\n`;
-  }
-  const result = await saveProfileFromText(home, {
-    label: safeLabel,
-    note: "",
-    kind: "third-party",
-    configText: normalizedConfigText,
-    authText: normalizedAuthText
-  });
-  if (shouldSwitch) {
-    await switchProfile(home, result.profile.id, { execute: true });
-  }
-  return { saved: true, profile: result.profile, switched: Boolean(shouldSwitch) };
-}
-
-async function saveProfileFromText(home, { label, note = "", kind = "custom", configText, authText = null }) {
-  const id = `${timestamp()}-${Math.random().toString(36).slice(2, 6)}`;
-  await fs.mkdir(profileDir(home), { recursive: true });
-  await fs.writeFile(path.join(profileDir(home), `${id}.toml`), configText);
-  const hasAuth = authText !== null;
-  if (hasAuth) {
-    await fs.writeFile(path.join(profileDir(home), `${id}.auth.json`), authText);
-  }
-  const profiles = await readProfileIndex(home);
-  const summary = summarizeConfig(configText);
-  const entry = {
-    id,
-    label,
-    note,
-    kind,
-    providerId: summary.modelProvider,
-    hasAuth,
-    createdAt: new Date().toISOString()
-  };
-  profiles.push(entry);
-  await writeProfileIndex(home, profiles);
-  return { saved: true, profile: entry };
-}
-
-async function useOfficialProvider(home, { execute }) {
-  await reconcileCurrentProvider(home);
-  const officialSource = await resolveOfficialProviderSource(home);
-  const content = officialSource.configText ?? setOfficialProviderInText(await readTextIfPresent(configPath(home), "") ?? "");
-  assertNoReservedProviderBlock(content);
-  const authToWrite = officialSource.authSource === "current" ? null : officialSource.authText;
-  const hasOfficialAuth = officialSource.hasOfficialAuth === true;
-  const authSource = officialSource.available ? publicOfficialSourceInfo(officialSource) : null;
-  const changes = [
-    { file: "config.toml", before: "(current)", after: "OpenAI Official" }
-  ];
-  if (authToWrite) {
-    changes.push({ file: "auth.json", before: "(current)", after: `${officialSource.source} "${officialSource.label ?? officialSource.source}"` });
-  }
-
-  if (!execute) {
-    return {
-      dryRun: true,
-      file: "config",
-      path: configPath(home),
-      bytes: Buffer.byteLength(content, "utf8"),
-      changes,
-      willWriteAuth: Boolean(authToWrite),
-      hasOfficialAuth,
-      authSource,
-      configText: content
-    };
-  }
-
-  if (!hasOfficialAuth) {
-    throw new Error("No OpenAI Official auth snapshot found. Open Codex with OpenAI Official once so Codex Manager can auto-save config.toml and auth.json, then switch back from a custom provider.");
-  }
-
-  await fs.writeFile(configPath(home), content);
-  if (authToWrite) {
-    await fs.writeFile(authPath(home), authToWrite);
-  }
-  return {
-    dryRun: false,
-    file: "config",
-    path: configPath(home),
-    switched: true,
-    wroteConfig: true,
-    wroteAuth: Boolean(authToWrite),
-    retainedCurrentAuth: !authToWrite,
-    authSource,
-    configText: content
-  };
-}
-
-async function deleteProfile(home, id, { execute }) {
-  const profiles = await readProfileIndex(home);
-  const entry = profiles.find((profile) => profile.id === id);
-  if (!entry) throw new Error(`Profile not found: ${id}`);
-  if (entry.id === OFFICIAL_PROFILE_ID || entry.autoManaged === true) {
-    throw new Error("OpenAI Official backup is managed automatically and cannot be deleted.");
-  }
-  if (!execute) return { dryRun: true, profile: entry };
-  await writeProfileIndex(home, profiles.filter((profile) => profile.id !== id));
-  await fs.rm(path.join(profileDir(home), `${id}.toml`), { force: true });
-  await fs.rm(path.join(profileDir(home), `${id}.auth.json`), { force: true });
-  return { dryRun: false, deleted: true, profile: entry };
-}
-
-async function switchProfile(home, profileId, { execute }) {
-  const entry = (await readProfileIndex(home)).find((p) => p.id === profileId);
-  if (!entry) throw new Error(`Profile not found: ${profileId}`);
-  const configSnapshot = await readTextIfPresent(path.join(profileDir(home), `${profileId}.toml`), null);
-  if (configSnapshot === null) throw new Error(`Profile config missing: ${profileId}`);
-  if (entry.kind !== "official") {
-    assertCustomProviderConfig(configSnapshot);
-  }
-  const authSnapshot = await readTextIfPresent(path.join(profileDir(home), `${profileId}.auth.json`), null);
-  const willWriteAuth = authSnapshot !== null;
-
-  if (!execute) {
-    const changes = [
-      { file: "config.toml", before: "(current)", after: `profile "${entry.label}"` }
-    ];
-    if (willWriteAuth) changes.push({ file: "auth.json", before: "(current)", after: `profile "${entry.label}"` });
-    return { dryRun: true, profile: entry, changes, willWriteAuth };
-  }
-
-  await fs.writeFile(configPath(home), configSnapshot);
-  if (willWriteAuth) {
-    await fs.writeFile(authPath(home), authSnapshot);
-  }
-  return { dryRun: false, profile: entry, wroteConfig: true, wroteAuth: willWriteAuth };
-}
-
-function renameProviderInText(text, fromId, toId) {
-  const lines = text.split("\n");
-  const changes = [];
-  for (let i = 0; i < lines.length; i += 1) {
-    const header = tableHeaderName(lines[i]);
-    if (header && providerKeyFromHeader(header) === fromId) {
-      lines[i] = lines[i].replace(/\[model_providers\..*\]/, `[model_providers.${toId}]`);
-      changes.push({ scope: "block", key: "header", before: fromId, after: toId });
-      // Rename the block's name field if it echoed the old id.
-      let end = lines.length;
-      for (let j = i + 1; j < lines.length; j += 1) {
-        if (isTableHeader(lines[j])) { end = j; break; }
-      }
-      if (readScalarInRange(lines, i + 1, end, "name") === fromId) {
-        setScalarInRange(lines, i + 1, end, "name", toId, i + 1);
-      }
-    }
-  }
-  const [ts, te] = topLevelRange(lines);
-  if (readScalarInRange(lines, ts, te, "model_provider") === fromId) {
-    setScalarInRange(lines, ts, te, "model_provider", toId, te);
-    changes.push({ scope: "top", key: "model_provider", before: fromId, after: toId });
-  }
-  return { text: lines.join("\n"), changes };
-}
-
-async function fixReservedProviders(home, { toId = "openai-custom", execute }) {
-  const text = await readTextIfPresent(configPath(home), "") ?? "";
-  let next = text;
-  const allChanges = [];
-  for (const id of BUILTIN_PROVIDER_IDS) {
-    const re = new RegExp(`^\\s*\\[model_providers\\.(?:"${escapeRegex(id)}"|${escapeRegex(id)})\\]`, "m");
-    if (re.test(next)) {
-      const result = renameProviderInText(next, id, toId);
-      next = result.text;
-      allChanges.push(...result.changes);
-    }
-  }
-  if (!allChanges.length) {
-    return { dryRun: !execute, noOp: true, changes: [] };
-  }
-  if (!execute) {
-    return { dryRun: true, toId, changes: allChanges };
-  }
-  const backupDir = await createBackup(home, `config-fix-reserved:${toId}`, []);
-  await fs.writeFile(configPath(home), next);
-  return { dryRun: false, toId, changes: allChanges, backupDir };
-}
-
-async function syncProviderTag(home, { toId, execute, mode = "retag" }) {
-  const text = await readTextIfPresent(configPath(home), "") ?? "";
-  const target = (toId && String(toId).trim()) || summarizeConfig(text).modelProvider;
-  const safeMode = mode === "repair" ? "repair" : "retag";
-  if (safeMode === "retag" && !target) {
-    throw new Error("No target provider id; set model_provider in config.toml or pass --to <id>");
-  }
-  const { mismatches, groups } = safeMode === "repair"
-    ? await collectProviderConsistencyMismatches(home, { strictRolloutPaths: true })
-    : await collectProviderTagMismatches(home, target, { strictRolloutPaths: true });
-  const total = mismatches.length;
-
-  if (!execute) {
-    return { dryRun: true, mode: safeMode, target: safeMode === "retag" ? target : null, groups, total };
-  }
-  if (!total) {
-    return { dryRun: false, mode: safeMode, target: safeMode === "retag" ? target : null, updated: 0, noOp: true };
-  }
-
-  const targetThreads = mismatches.map((mismatch) => mismatch.thread);
-  assertThreadRolloutsInsideHome(home, targetThreads);
-  const backupDir = await createBackup(home, safeMode === "repair" ? "config-sync:repair" : `config-sync:${target}`, targetThreads);
-  try {
-    const rolloutUpdates = [];
-    for (const mismatch of mismatches.filter((item) => item.needsRollout)) {
-      const prepared = await prepareRolloutProviderUpdate(mismatch.thread.rollout_path, mismatch.targetProvider ?? target);
-      if (!prepared.changed) {
-        if (prepared.reason === "already-target") continue;
-        throw new Error(`Cannot update rollout provider for ${mismatch.thread.id}: ${prepared.reason}`);
-      }
-      rolloutUpdates.push({ thread: mismatch.thread, ...prepared });
-    }
-
-    const db = openDb(home);
-    let dbUpdated = 0;
-    try {
-      db.exec("PRAGMA busy_timeout = 5000");
-      db.exec("BEGIN IMMEDIATE");
-      let changes = 0;
-      if (safeMode === "repair") {
-        const updateThread = db.prepare("UPDATE threads SET model_provider = ? WHERE id = ?");
-        for (const mismatch of mismatches.filter((item) => item.needsDb)) {
-          changes += Number(updateThread.run(mismatch.targetProvider, mismatch.thread.id).changes ?? 0);
-        }
-      } else {
-        changes = Number(db.prepare("UPDATE threads SET model_provider = ? WHERE model_provider <> ?").run(target, target).changes ?? 0);
-      }
-      db.exec("COMMIT");
-      dbUpdated = changes;
-    } catch (error) {
-      try {
-        db.exec("ROLLBACK");
-      } catch {
-        // Surface the original failure.
-      }
-      throw error;
-    } finally {
-      db.close();
-    }
-
-    for (const update of rolloutUpdates) {
-      await fs.writeFile(update.thread.rollout_path, update.content);
-    }
-    return {
-      dryRun: false,
-      mode: safeMode,
-      target: safeMode === "retag" ? target : null,
-      updated: total,
-      dbUpdated,
-      rolloutUpdated: rolloutUpdates.length,
-      groups,
-      backupDir
-    };
-  } catch (error) {
-    await restoreMutationBackup(home, backupDir);
-    throw error;
-  }
-}
-
-
 export {
+  assertThreadRolloutsInsideHome,
   codexHome,
-  dbPath,
-  globalStatePath,
-  backupRoot,
-  normalizePathForCompare,
-  isInsideDir,
-  relativeInside,
+  collectProviderTagMismatches,
+  collectProviderConsistencyMismatches,
+  createBackup,
+  deleteProject,
+  getProjectlessThreads,
+  getProjects,
+  getStatus,
   isTruthy,
+  listBackups,
+  openDb,
   parseLimit,
   parsePort,
-  pathExists,
-  openDb,
-  readThreads,
-  readThreadById,
-  readThreadByRef,
-  getProjectlessThreadIds,
-  getProjectlessThreads,
+  placeholders,
+  prepareRolloutProviderUpdate,
   readJsonIfPresent,
-  getProjects,
-  scanRollouts,
-  getStatus,
-  createBackup,
-  listBackups,
-  resolveProjectRef,
+  readThreadByRef,
+  readThreads,
   resolveBackupRef,
-  trashThreads,
-  deleteProject,
+  resolveProjectRef,
   restoreBackup,
-  configPath,
-  authPath,
-  profileDir,
-  profileIndexPath,
-  summarizeConfig,
-  providerKind,
-  isReservedProviderId,
-  findReservedProviderBlocks,
-  assertNoReservedProviderBlock,
-  readAuthSummary,
-  ensureOfficialProviderSnapshot,
-  readConfigFile,
-  writeConfigFile,
-  assertProfileId,
-  requireProfile,
-  readProfileFile,
-  writeProfileFile,
-  readProfileIndex,
-  writeProfileIndex,
-  listProfiles,
-  getConfigOverview,
-  getOfficialProviderFiles,
-  saveProfile,
-  saveProfileFromText,
-  createProvider,
-  useOfficialProvider,
-  deleteProfile,
-  switchProfile,
-  renameProviderInText,
-  fixReservedProviders,
-  syncProviderTag
+  restoreMutationBackup,
+  timestamp,
+  trashThreads
 };

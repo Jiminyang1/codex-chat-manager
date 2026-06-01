@@ -6,10 +6,13 @@ import http from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { invokeAction, safeCodexHome } from "./app-api.js";
+import type { ActionName } from "./actions.cjs";
+import type { JsonRecord } from "./types.js";
 
-const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const publicDir = path.join(rootDir, "public");
-const rendererDistDir = path.join(rootDir, "dist", "renderer");
+const moduleDir = path.dirname(fileURLToPath(import.meta.url));
+const isCompiledNodeServer = moduleDir.endsWith(path.join("dist", "node", "src"));
+const rootDir = isCompiledNodeServer ? path.resolve(moduleDir, "..", "..") : path.resolve(moduleDir, "..");
+const rendererDistDir = isCompiledNodeServer ? path.join(rootDir, "renderer") : path.join(rootDir, "dist", "renderer");
 const defaultPort = Number.parseInt(process.env.PORT ?? "8765", 10);
 
 const jsonHeaders = {
@@ -17,12 +20,12 @@ const jsonHeaders = {
   "cache-control": "no-store"
 };
 
-function sendJson(res, status, body) {
+function sendJson(res: http.ServerResponse, status: number, body: unknown): void {
   res.writeHead(status, jsonHeaders);
   res.end(JSON.stringify(body));
 }
 
-function sendText(res, status, text, contentType = "text/plain; charset=utf-8") {
+function sendText(res: http.ServerResponse, status: number, text: string, contentType = "text/plain; charset=utf-8"): void {
   res.writeHead(status, {
     "content-type": contentType,
     "cache-control": "no-store"
@@ -30,15 +33,15 @@ function sendText(res, status, text, contentType = "text/plain; charset=utf-8") 
   res.end(text);
 }
 
-async function readBody(req) {
-  const chunks = [];
-  for await (const chunk of req) chunks.push(chunk);
+async function readBody(req: http.IncomingMessage): Promise<JsonRecord> {
+  const chunks: Buffer[] = [];
+  for await (const chunk of req) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
   if (!chunks.length) return {};
   const text = Buffer.concat(chunks).toString("utf8");
   return text ? JSON.parse(text) : {};
 }
 
-function selectContentType(filePath) {
+function selectContentType(filePath: string): string {
   if (filePath.endsWith(".html")) return "text/html; charset=utf-8";
   if (filePath.endsWith(".css")) return "text/css; charset=utf-8";
   if (filePath.endsWith(".js")) return "text/javascript; charset=utf-8";
@@ -52,18 +55,18 @@ async function staticRoot() {
     const stat = await fs.stat(path.join(rendererDistDir, "index.html"));
     if (stat.isFile()) return rendererDistDir;
   } catch {
-    // Development without a Vite build falls back to public/.
+    // Development without a Vite build returns a clear setup message below.
   }
-  return publicDir;
+  return null;
 }
 
-async function serveStatic(req, res) {
+async function serveStatic(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
   const root = await staticRoot();
-  const url = new URL(req.url, "http://localhost");
-  if (root === publicDir && (url.pathname === "/" || url.pathname === "/index.html")) {
+  if (!root) {
     sendText(res, 503, "Run npm run build:renderer before npm run web, or use npm run electron:dev for development.");
     return;
   }
+  const url = new URL(req.url ?? "/", "http://localhost");
   const requestPath = decodeURIComponent(url.pathname === "/" ? "/index.html" : url.pathname);
   const resolved = path.resolve(root, `.${requestPath}`);
   const relative = path.relative(root, resolved);
@@ -74,7 +77,7 @@ async function serveStatic(req, res) {
   try {
     sendText(res, 200, await fs.readFile(resolved, "utf8"), selectContentType(resolved));
   } catch (error) {
-    if (error?.code === "ENOENT") {
+    if ((error as NodeJS.ErrnoException)?.code === "ENOENT") {
       sendText(res, 404, "Not found");
       return;
     }
@@ -82,7 +85,7 @@ async function serveStatic(req, res) {
   }
 }
 
-async function handleLegacyApi(req, res, url) {
+async function handleLegacyApi(req: http.IncomingMessage, res: http.ServerResponse, url: URL): Promise<boolean> {
   const queryHome = safeCodexHome(url.searchParams.get("codexHome"));
   if (req.method === "GET" && url.pathname === "/api/status") {
     sendJson(res, 200, await invokeAction("status:get", { codexHome: queryHome }));
@@ -125,7 +128,7 @@ async function handleLegacyApi(req, res, url) {
     }));
     return true;
   }
-  const routeMap = {
+  const routeMap: Record<string, ActionName> = {
     "/api/trash-thread": "thread:trash",
     "/api/delete-project": "project:delete",
     "/api/restore": "backup:restore",
@@ -139,25 +142,26 @@ async function handleLegacyApi(req, res, url) {
     "/api/config/save-profile": "profile:save",
     "/api/config/delete-profile": "profile:delete"
   };
-  if (req.method === "POST" && routeMap[url.pathname]) {
-    sendJson(res, 200, await invokeAction(routeMap[url.pathname], await readBody(req)));
+  const action = routeMap[url.pathname];
+  if (req.method === "POST" && action) {
+    sendJson(res, 200, await invokeAction(action, await readBody(req)));
     return true;
   }
   return false;
 }
 
-async function handleApi(req, res) {
-  const url = new URL(req.url, "http://localhost");
+async function handleApi(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+  const url = new URL(req.url ?? "/", "http://localhost");
   if (req.method === "POST" && url.pathname === "/api/action") {
     const body = await readBody(req);
-    sendJson(res, 200, await invokeAction(body.action, body.payload ?? {}));
+    sendJson(res, 200, await invokeAction(String(body.action), body.payload ?? {}));
     return;
   }
   if (await handleLegacyApi(req, res, url)) return;
   sendJson(res, 404, { error: "Unknown API route" });
 }
 
-export function startServer({ host = "127.0.0.1", port = defaultPort } = {}) {
+export function startServer({ host = "127.0.0.1", port = defaultPort }: { host?: string; port?: number } = {}) {
   const server = http.createServer(async (req, res) => {
     try {
       if (req.url?.startsWith("/api/")) {

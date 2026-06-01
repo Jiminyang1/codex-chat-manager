@@ -3,7 +3,9 @@ import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
 
-export async function getCodexDesktopProcesses() {
+type CodexProcess = { pid: number; command: string };
+
+export async function getCodexDesktopProcesses(): Promise<CodexProcess[]> {
   if (process.platform !== "darwin") return [];
   const { stdout } = await execFileAsync("ps", ["-axo", "pid=,comm="], { maxBuffer: 1024 * 1024 });
   return stdout
@@ -14,7 +16,7 @@ export async function getCodexDesktopProcesses() {
       const match = line.match(/^(\d+)\s+(.+)$/);
       return match ? { pid: Number(match[1]), command: match[2] } : null;
     })
-    .filter(Boolean)
+    .filter((proc): proc is CodexProcess => proc !== null)
     .filter((proc) => proc.command.endsWith("/Applications/Codex.app/Contents/MacOS/Codex"));
 }
 

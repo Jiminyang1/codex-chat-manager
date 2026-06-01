@@ -1,4 +1,9 @@
-export async function invoke(action, payload = {}) {
+import type { ActionName, ActionPayload, ActionResult } from "../../src/actions.cjs";
+
+export async function invoke<Action extends ActionName>(
+  action: Action,
+  payload: Partial<ActionPayload<Action>> & Record<string, unknown> = {}
+): Promise<ActionResult<Action>> {
   const fullPayload = {
     codexHome: window.localStorage.getItem("codexHome") || "",
     ...payload
@@ -15,13 +20,13 @@ export async function invoke(action, payload = {}) {
   if (!response.ok || data?.error) {
     throw new Error(data?.error || response.statusText);
   }
-  return data;
+  return data as ActionResult<Action>;
 }
 
-export function setCodexHome(value) {
+export function setCodexHome(value: string): void {
   window.localStorage.setItem("codexHome", value || "");
 }
 
-export function getCodexHome() {
+export function getCodexHome(): string {
   return window.localStorage.getItem("codexHome") || "";
 }

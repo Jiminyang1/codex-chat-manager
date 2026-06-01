@@ -4,29 +4,38 @@
   "description": "Safe local manager for Codex Desktop projects and chat history.",
   "type": "module",
   "bin": {
-    "codex-chat-manager": "./src/cli.js"
+    "codex-chat-manager": "./dist/node/src/cli.js"
   },
   "files": [
+    "dist/node/src",
+    "dist/node/electron",
+    "dist/renderer",
     "src",
     "electron",
     "renderer",
-    "public",
     "docs",
-    "vite.config.js",
+    "vite.config.ts",
+    "tsconfig.json",
+    "tsconfig.node.json",
+    "tsconfig.renderer.json",
     "README.md",
     "LICENSE",
     "CHANGELOG.md"
   ],
   "scripts": {
-    "start": "node src/server.js",
-    "web": "node src/server.js",
+    "start": "npm run build:node --silent && node dist/node/src/server.js",
+    "web": "npm run build:node --silent && node dist/node/src/server.js",
     "dev:renderer": "vite --host 127.0.0.1",
-    "electron": "electron electron/main.js",
-    "electron:dev": "concurrently -k -s first -n renderer,electron \"npm:dev:renderer\" \"wait-on http://127.0.0.1:5173 && electron electron/main.js\"",
-    "status": "node src/cli.js status",
-    "test": "node --test",
+    "electron": "npm run build:node --silent && electron dist/node/electron/main.js",
+    "electron:dev": "concurrently -k -s first -n node,renderer,electron \"tsc -p tsconfig.node.json --watch --preserveWatchOutput\" \"npm:dev:renderer\" \"wait-on http://127.0.0.1:5173 dist/node/electron/main.js && electron dist/node/electron/main.js --dev\"",
+    "status": "npm run build:node --silent && node dist/node/src/cli.js status",
+    "test": "npm run build:node --silent && node --test dist/node/test/*.test.js",
+    "build:node": "tsc -p tsconfig.node.json",
+    "typecheck:renderer": "tsc -p tsconfig.renderer.json",
+    "build": "npm run build:node && npm run typecheck:renderer && npm run build:renderer",
     "build:renderer": "vite build",
-    "pack:check": "npm pack --dry-run"
+    "pack:check": "npm run build --silent && npm pack --dry-run",
+    "prepare": "npm run build"
   },
   "engines": {
     "node": ">=24.0.0"
@@ -47,6 +56,15 @@
     "react": "^19.2.6",
     "react-dom": "^19.2.6",
     "vite": "^8.0.14",
-    "wait-on": "^9.0.3"
+    "wait-on": "^9.0.3",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "^4.3.0",
+    "@types/node": "^25.9.1",
+    "@types/react": "^19.2.15",
+    "@types/react-dom": "^19.2.3",
+    "tailwindcss": "^4.3.0",
+    "typescript": "^6.0.3"
   }
 }

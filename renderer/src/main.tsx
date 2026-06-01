@@ -1,8 +1,7 @@
-import React, { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type CSSProperties, type FormEvent, type MouseEvent as ReactMouseEvent } from "react";
 import { createRoot } from "react-dom/client";
 import {
   ArchiveRestore,
-  Check,
   ChevronRight,
   Folder,
   Info,
@@ -15,70 +14,96 @@ import {
   Search,
   Settings,
   Shield,
-  Sun,
-  Trash2
+  Sun
 } from "lucide-react";
-import { getCodexHome, invoke, setCodexHome } from "./api.js";
+import { getCodexHome, invoke, setCodexHome } from "./api";
+import { BackupDetail } from "./components/BackupDetail";
+import { ConfirmModal, NewProviderModal, ProfileEditor } from "./components/Modals";
+import { ProviderDetail } from "./components/ProviderDetail";
+import { StatusPanel } from "./components/StatusPanel";
+import { SyncDetail } from "./components/SyncDetail";
+import { ThreadDetail } from "./components/ThreadDetail";
+import {
+  backupGroupMeta,
+  backupProjectLabel,
+  backupProjectPath,
+  backupRestoreMessage,
+  backupRowSubtitle,
+  backupRowTitle,
+  backupScopeLabel,
+  backupSubtitle,
+  backupTitle
+} from "./lib/backup-helpers";
+import { clamp, formatDate, projectName, shortPath, storedNumber } from "./lib/format";
+import { defaultProviderAuth, defaultProviderConfig, officialSwitchMessage, profileSummary, providerIdFromLabel } from "./lib/provider-helpers";
 import "./styles.css";
+import type { BackupScope, BackupSummary, ConfigOverview, JsonRecord, ProcessStatus, Project, ProviderProfile, Status, SyncMode, Thread } from "../../src/types";
+import type { ActionName } from "../../src/actions.cjs";
 
-function formatDate(seconds) {
-  if (!seconds) return "-";
-  return new Intl.DateTimeFormat(undefined, {
-    month: "short",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit"
-  }).format(new Date(seconds * 1000));
-}
+type ThemePreference = "system" | "light" | "dark";
+type View = "chats" | "providers" | "sync" | "backups" | "settings";
+type BackupCategory = "chats" | "providers" | "sync";
+type ProviderItem = JsonRecord & {
+  id: string;
+  title: string;
+  active?: boolean;
+  profile?: ProviderProfile;
+  summary?: JsonRecord | null;
+};
+type SyncItem = {
+  id: SyncMode;
+  title: string;
+  count: number;
+  subtitle: string;
+  description: string;
+  actionLabel: string;
+  tone: "primary" | "danger";
+  groups: JsonRecord[];
+};
+type ModalState =
+  | null
+  | { kind: "new-provider" }
+  | {
+      kind?: undefined;
+      title: string;
+      body?: string;
+      confirmLabel?: string;
+      tone?: "primary" | "danger";
+      hideCancel?: boolean;
+      action: () => unknown | Promise<unknown>;
+    };
+type EditorState = {
+  profile: ProviderProfile;
+  tab: "config" | "auth";
+  drafts: { config: string; auth: string };
+} | null;
+type NewProviderDraft = {
+  label: string;
+  configText: string;
+  authText: string;
+  switch: boolean;
+};
+type ProviderFilesState = JsonRecord & {
+  key: string;
+  loading: boolean;
+  error: string;
+  config: string;
+  auth: string;
+  missing: boolean;
+};
+type BackupGroup = {
+  key: string;
+  projectPath: string;
+  title: string;
+  backups: BackupSummary[];
+  chatCount: number;
+};
+type ShellStyle = CSSProperties & {
+  "--sidebar-width": string;
+  "--detail-width": string;
+};
 
-function shortPath(value) {
-  return value ? String(value).replace(/^\/Users\/[^/]+/, "~") : "";
-}
-
-function projectName(value) {
-  if (!value) return "(no project)";
-  return String(value).split("/").filter(Boolean).at(-1) || shortPath(value);
-}
-
-function profileSummary(raw) {
-  const provider = raw?.match(/^model_provider\s*=\s*"?(.+?)"?\s*$/m)?.[1]?.replaceAll("\"", "") ?? "-";
-  const baseUrl = raw?.match(/^base_url\s*=\s*"?(.+?)"?\s*$/m)?.[1]?.replaceAll("\"", "") ?? "-";
-  const modelLine = raw?.split("\n").find((line) => /^\s*model\s*=/.test(line) && !/model_provider/.test(line));
-  return {
-    provider,
-    baseUrl,
-    model: modelLine ? modelLine.split("=")[1].trim().replaceAll("\"", "") : "-"
-  };
-}
-
-function providerIdFromConfig(raw) {
-  return raw?.match(/^model_provider\s*=\s*"?(.+?)"?\s*$/m)?.[1]?.replaceAll("\"", "").trim() ?? "";
-}
-
-function officialSwitchMessage(snapshot) {
-  if (snapshot?.source === "profile" && snapshot.hasOfficialAuth !== false) {
-    const label = snapshot.autoManaged ? "the auto-saved OpenAI Official snapshot" : `"${snapshot.label}"`;
-    return `Use ${label} and restore auth.json.`;
-  }
-  if (snapshot?.source === "backup") {
-    if (snapshot.hasOfficialAuth) {
-      return `Use backup config "${snapshot.label}" with current OpenAI login.`;
-    }
-    return `Backup "${snapshot.label}" has no usable auth.json.`;
-  }
-  return "Use OpenAI Official with current auth.json.";
-}
-
-function storedNumber(key, fallback) {
-  const value = Number.parseInt(window.localStorage.getItem(key) ?? "", 10);
-  return Number.isFinite(value) ? value : fallback;
-}
-
-function clamp(value, min, max) {
-  return Math.min(max, Math.max(min, value));
-}
-
-const MUTATIONS_REQUIRING_CODEX_CLOSED = new Set([
+const MUTATIONS_REQUIRING_CODEX_CLOSED = new Set<ActionName>([
   "thread:trash",
   "project:delete",
   "backup:restore",
@@ -96,228 +121,77 @@ const BACKUP_CATEGORIES = [
   { id: "chats", title: "Chats / Projects", label: "Chats", icon: Folder },
   { id: "providers", title: "Config History", label: "Config", icon: KeyRound },
   { id: "sync", title: "Sync / Metadata", label: "Sync", icon: Shield }
-];
+ ] as const;
 
 const THEME_STORAGE_KEY = "appearance.theme";
 const THEME_OPTIONS = [
   { id: "system", label: "System", icon: Monitor },
   { id: "light", label: "Light", icon: Sun },
   { id: "dark", label: "Dark", icon: Moon }
-];
+ ] as const;
 
-function storedThemePreference() {
+let toastTimer: number | undefined;
+
+function storedThemePreference(): ThemePreference {
   const value = window.localStorage.getItem(THEME_STORAGE_KEY);
-  return THEME_OPTIONS.some((option) => option.id === value) ? value : "system";
+  return THEME_OPTIONS.some((option) => option.id === value) ? value as ThemePreference : "system";
 }
 
-function resolvedTheme(preference) {
+function resolvedTheme(preference: ThemePreference): "light" | "dark" {
   if (preference === "light" || preference === "dark") return preference;
   return window.matchMedia?.("(prefers-color-scheme: dark)").matches ? "dark" : "light";
 }
 
-function applyTheme(preference) {
+function applyTheme(preference: ThemePreference): void {
   document.documentElement.dataset.theme = resolvedTheme(preference);
   document.documentElement.dataset.themePreference = preference;
 }
 
 applyTheme(storedThemePreference());
 
-function backupCategoryTitle(id) {
+function backupCategoryTitle(id: BackupCategory): string {
   return BACKUP_CATEGORIES.find((category) => category.id === id)?.title ?? "Backups";
-}
-
-function formatBackupDate(value) {
-  if (!value) return "-";
-  return new Intl.DateTimeFormat(undefined, {
-    month: "short",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit"
-  }).format(new Date(value));
-}
-
-function backupFilesSummary(files) {
-  const names = [];
-  if (files?.db) names.push("SQLite");
-  if (files?.config) names.push("config.toml");
-  if (files?.auth) names.push("auth.json");
-  if (files?.globalState) names.push("global state");
-  if (files?.trashManifest) names.push("trash");
-  return names;
-}
-
-function backupScopeLabel(scope) {
-  if (scope === "chats") return "Restore chats";
-  if (scope === "config") return "Restore config/auth";
-  if (scope === "metadata") return "Restore metadata";
-  return "Restore";
-}
-
-function backupRestoreMessage(backup, scope, activeProvider) {
-  const created = formatBackupDate(backup?.createdAt);
-  const count = backup?.threadIds?.length ?? 0;
-  if (scope === "chats") {
-    return [
-      `${backup?.title || "Backup"} · ${created}`,
-      "",
-      `Restore ${count} chat(s), rollout files, and chat sidebar references from this backup.`,
-      "",
-      `Restored chats will be aligned to the current active provider: ${activeProvider || "-"}. This keeps a later provider sync/retag in place.`
-    ].join("\n");
-  }
-  if (scope === "config") {
-    return [
-      `${backup?.title || "Backup"} · ${created}`,
-      "",
-      "Restore config.toml and auth.json from this backup.",
-      "",
-      "SQLite chats, project state, and provider metadata are left unchanged."
-    ].join("\n");
-  }
-  if (scope === "metadata") {
-    return [
-      `${backup?.title || "Backup"} · ${created}`,
-      "",
-      `Restore provider metadata for ${count} chat(s) from this backup.`,
-      "",
-      "This can undo a later provider sync/retag. config.toml and auth.json are left unchanged."
-    ].join("\n");
-  }
-  return `${backup?.title || "Backup"} · ${created}`;
-}
-
-function backupTitle(backup) {
-  if (backup?.category === "chats") {
-    const chats = backup.chatSummaries ?? [];
-    if (backup.kind === "chat" && chats[0]) return chats[0].title || "(untitled)";
-    if (backup.kind === "project" && backup.projectRoot) return projectName(backup.projectRoot);
-    if (backup.kind === "project" && chats[0]) return chats[0].title || `${chats.length || backup.threadIds?.length || 0} chat(s)`;
-    return `${chats.length || backup.threadIds?.length || 0} chat(s)`;
-  }
-  return backup?.title || backup?.reason || "Backup";
-}
-
-function backupKindLabel(backup) {
-  if (!backup) return "backup";
-  if (backup.category === "chats") {
-    if (backup.kind === "project") return backup.projectRoot ? "project" : ((backup.threadIds?.length ?? 0) > 1 ? "chats" : "chat");
-    if (backup.kind === "chat") return "chat";
-    return "chats";
-  }
-  if (backup.category === "providers") return "config";
-  if (backup.category === "sync") return "metadata";
-  return backup.kind || backup.category || "backup";
-}
-
-function backupProjectPath(backup) {
-  if (backup?.category !== "chats") return "";
-  if (backup.projectRoot) return backup.projectRoot;
-  const first = backup.chatSummaries?.[0];
-  if (first?.projectless) return "";
-  return first?.savedProjectRoot || "";
-}
-
-function backupProjectLabel(projectPath) {
-  return projectPath ? projectName(projectPath) : "Projectless chats";
-}
-
-function backupGroupMeta(group) {
-  const project = group.projectPath ? shortPath(group.projectPath) : "No saved project path";
-  const snapshotCount = group.backups.length;
-  const chatCount = group.chatCount;
-  return `${project} · ${snapshotCount} backup${snapshotCount === 1 ? "" : "s"} · ${chatCount} chat${chatCount === 1 ? "" : "s"}`;
-}
-
-function backupSubjectLabel(backup) {
-  if (!backup) return "-";
-  const chats = backup.chatSummaries ?? [];
-  const first = chats[0];
-  if (backup.category === "chats") {
-    if (backup.projectRoot) return shortPath(backup.projectRoot);
-    if (backup.kind === "project") return "Projectless chats";
-    if (backup.kind === "chat" && first) return first.title || first.id;
-    return backup.subject || first?.title || first?.id || "-";
-  }
-  return backup.subject || backup.reason || "-";
-}
-
-function backupRowTitle(backup) {
-  if (backup?.category === "chats" && backup.kind === "project" && backup.projectRoot) return "Project snapshot";
-  return backupTitle(backup);
-}
-
-function backupRowSubtitle(backup) {
-  if (backup?.category === "chats") {
-    const chats = backup.chatSummaries ?? [];
-    const first = chats[0];
-    const count = chats.length || backup.threadIds?.length || 0;
-    if (first) {
-      const more = count > 1 ? ` + ${count - 1} more` : "";
-      return `${first.model_provider || "-"} · ${formatDate(first.updated_at)}${more}`;
-    }
-    return `${count} chat(s) · ${formatBackupDate(backup.createdAt)}`;
-  }
-  return backupSubtitle(backup);
-}
-
-function backupChatLocation(thread, backup) {
-  if (backup?.projectRoot) return projectName(backup.projectRoot);
-  if (thread?.projectless || !thread?.savedProjectRoot) return "Projectless";
-  return projectName(thread.savedProjectRoot);
-}
-
-function backupSubtitle(backup) {
-  if (backup?.category === "chats") {
-    const chats = backup.chatSummaries ?? [];
-    const first = chats[0];
-    const count = chats.length || backup.threadIds?.length || 0;
-    if (first) {
-      const more = count > 1 ? ` + ${count - 1} more` : "";
-      return `${projectName(first.cwd)} · ${first.model_provider || "-"} · ${formatDate(first.updated_at)}${more}`;
-    }
-    return `${count} chat(s) · ${formatBackupDate(backup.createdAt)}`;
-  }
-  return `${backup?.subject || backup?.reason || "snapshot"} · ${backup?.threadIds?.length ?? 0} chats · ${formatBackupDate(backup?.createdAt)}`;
 }
 
 function App() {
   const [codexHome, setHome] = useState(getCodexHome());
-  const [status, setStatus] = useState(null);
-  const [projects, setProjects] = useState([]);
-  const [threads, setThreads] = useState([]);
-  const [projectlessThreads, setProjectlessThreads] = useState([]);
-  const [backups, setBackups] = useState([]);
-  const [config, setConfig] = useState(null);
+  const [status, setStatus] = useState<Status | null>(null);
+  const [projects, setProjects] = useState<Project[]>([]);
+  const [threads, setThreads] = useState<Thread[]>([]);
+  const [projectlessThreads, setProjectlessThreads] = useState<Thread[]>([]);
+  const [backups, setBackups] = useState<BackupSummary[]>([]);
+  const [config, setConfig] = useState<ConfigOverview | null>(null);
   const [selectedProject, setSelectedProject] = useState("");
   const [selectedProjectlessThreadId, setSelectedProjectlessThreadId] = useState("");
   const [selectedProvider, setSelectedProvider] = useState("");
   const [selectedThreadId, setSelectedThreadId] = useState("");
-  const [backupCategory, setBackupCategory] = useState("chats");
+  const [selectedSyncMode, setSelectedSyncMode] = useState<SyncMode>("repair");
+  const [backupCategory, setBackupCategory] = useState<BackupCategory>("chats");
   const [selectedBackupPath, setSelectedBackupPath] = useState("");
-  const [view, setView] = useState("chats");
+  const [view, setView] = useState<View>("chats");
   const [search, setSearch] = useState("");
   const [archived, setArchived] = useState(false);
   const [busy, setBusy] = useState(false);
   const [toast, setToast] = useState("");
-  const [modal, setModal] = useState(null);
-  const [profileSummaries, setProfileSummaries] = useState({});
-  const [providerFiles, setProviderFiles] = useState({ key: "", loading: false, error: "", config: "", auth: "", missing: false });
+  const [modal, setModal] = useState<ModalState>(null);
+  const [profileSummaries, setProfileSummaries] = useState<Record<string, JsonRecord | null>>({});
+  const [providerFiles, setProviderFiles] = useState<ProviderFilesState>({ key: "", loading: false, error: "", config: "", auth: "", missing: false });
   const [expandedFiles, setExpandedFiles] = useState({ config: false, auth: false });
   const [selectedProviderCard, setSelectedProviderCard] = useState("official");
-  const [editor, setEditor] = useState(null);
-  const [newProvider, setNewProvider] = useState({
+  const [editor, setEditor] = useState<EditorState>(null);
+  const [newProvider, setNewProvider] = useState<NewProviderDraft>({
     label: "",
     configText: "",
     authText: "",
     switch: true
   });
-  const [expandedBackupGroups, setExpandedBackupGroups] = useState(() => new Set());
+  const [expandedBackupGroups, setExpandedBackupGroups] = useState<Set<string>>(() => new Set());
   const [sidebarWidth, setSidebarWidth] = useState(() => storedNumber("layout.sidebarWidth", 236));
   const [detailWidth, setDetailWidth] = useState(() => storedNumber("layout.detailWidth", 360));
   const [themePreference, setThemePreference] = useState(storedThemePreference);
 
-  const providers = useMemo(() => {
-    const counts = new Map();
+  const providers = useMemo<[string, number][]>(() => {
+    const counts = new Map<string, number>();
     for (const row of status?.sqliteProviders ?? []) {
       counts.set(row.model_provider, (counts.get(row.model_provider) ?? 0) + Number(row.count || 0));
     }
@@ -356,8 +230,31 @@ function App() {
   const retagCount = status?.activeProvider === activeProvider && Number.isFinite(status?.providerSyncMismatchCount)
     ? status.providerSyncMismatchCount
     : providers.filter(([provider]) => provider !== activeProvider).reduce((sum, [, count]) => sum + count, 0);
-  const repairCount = Number.isFinite(status?.providerRepairMismatchCount) ? status.providerRepairMismatchCount : 0;
-  const providerItems = useMemo(() => [
+  const repairCount = status && Number.isFinite(status.providerRepairMismatchCount) ? status.providerRepairMismatchCount : 0;
+  const syncItems = useMemo<SyncItem[]>(() => [
+    {
+      id: "repair",
+      title: "Repair mismatches",
+      count: repairCount,
+      subtitle: "Fix SQLite / rollout metadata disagreements",
+      description: "Updates only chats where SQLite and rollout metadata disagree. It keeps each chat on its original provider tag.",
+      actionLabel: "Repair mismatches",
+      tone: "primary",
+      groups: status?.providerRepairMismatchGroups ?? []
+    },
+    {
+      id: "retag",
+      title: "Retag to active provider",
+      count: retagCount,
+      subtitle: activeProvider ? `Move non-${activeProvider} chats to ${activeProvider}` : "No active provider detected",
+      description: "Changes every chat outside the active provider to the current provider id. This makes hidden chats visible here, but overwrites previous provider tags.",
+      actionLabel: "Retag all chats",
+      tone: "danger",
+      groups: status?.providerSyncMismatchGroups ?? []
+    }
+  ], [activeProvider, repairCount, retagCount, status]);
+  const selectedSyncItem = syncItems.find((item) => item.id === selectedSyncMode) ?? syncItems[0];
+  const providerItems = useMemo<ProviderItem[]>(() => [
     {
       id: "official",
       title: "OpenAI Official",
@@ -376,10 +273,10 @@ function App() {
   ], [activeProvider, config, profileSummaries]);
   const profilesKey = (config?.profiles ?? []).map((profile) => `${profile.id}:${profile.updatedAt ?? profile.createdAt ?? ""}:${profile.active ? "1" : "0"}`).join("|");
   const selectedProviderItem = providerItems.find((item) => item.id === selectedProviderCard) ?? providerItems[0] ?? null;
-  const backupCounts = useMemo(() => {
-    const counts = { chats: 0, providers: 0, sync: 0 };
+  const backupCounts = useMemo<Record<BackupCategory, number>>(() => {
+    const counts: Record<BackupCategory, number> = { chats: 0, providers: 0, sync: 0 };
     for (const backup of backups) {
-      const category = backup.category && counts[backup.category] !== undefined ? backup.category : "providers";
+      const category = backup.category === "chats" || backup.category === "providers" || backup.category === "sync" ? backup.category : "providers";
       counts[category] += 1;
     }
     return counts;
@@ -387,9 +284,9 @@ function App() {
   const filteredBackups = useMemo(() => (
     backups.filter((backup) => (backup.category ?? "providers") === backupCategory)
   ), [backups, backupCategory]);
-  const groupedChatBackups = useMemo(() => {
-    const groups = [];
-    const byProject = new Map();
+  const groupedChatBackups = useMemo<BackupGroup[]>(() => {
+    const groups: BackupGroup[] = [];
+    const byProject = new Map<string, BackupGroup>();
     for (const backup of filteredBackups) {
       const projectPath = backupProjectPath(backup);
       const key = projectPath || "__projectless__";
@@ -412,13 +309,13 @@ function App() {
   }, [filteredBackups]);
   const selectedBackup = filteredBackups.find((backup) => backup.path === selectedBackupPath) ?? filteredBackups[0] ?? null;
 
-  function notify(message) {
+  function notify(message: string) {
     setToast(message);
-    window.clearTimeout(notify.timer);
-    notify.timer = window.setTimeout(() => setToast(""), 3200);
+    window.clearTimeout(toastTimer);
+    toastTimer = window.setTimeout(() => setToast(""), 3200);
   }
 
-  function toggleBackupGroup(key) {
+  function toggleBackupGroup(key: string) {
     setExpandedBackupGroups((current) => {
       const next = new Set(current);
       if (next.has(key)) next.delete(key);
@@ -475,7 +372,7 @@ function App() {
         setSelectedProjectlessThreadId(nextProjectlessThreads[0].id);
       }
     } catch (error) {
-      notify(error.message);
+      notify(error instanceof Error ? error.message : String(error));
     } finally {
       setBusy(false);
     }
@@ -500,7 +397,7 @@ function App() {
       setThreads(nextThreads);
       setProjectlessThreads(nextProjectlessThreads);
     } catch (error) {
-      notify(error.message);
+      notify(error instanceof Error ? error.message : String(error));
     }
   }
 
@@ -516,7 +413,7 @@ function App() {
 
   useEffect(() => {
     async function loadProfileSummaries() {
-      const summaries = {};
+      const summaries: Record<string, JsonRecord | null> = {};
       for (const profile of config?.profiles ?? []) {
         try {
           const file = await invoke("profile:file:get", { codexHome, profileId: profile.id, file: "config" });
@@ -582,7 +479,7 @@ function App() {
           }
         } catch (error) {
           if (!cancelled) {
-            setProviderFiles({ key, loading: false, error: error.message, config: "", auth: "", missing: false });
+            setProviderFiles({ key, loading: false, error: error instanceof Error ? error.message : String(error), config: "", auth: "", missing: false });
           }
         }
         return;
@@ -611,7 +508,7 @@ function App() {
         }
       } catch (error) {
         if (!cancelled) {
-          setProviderFiles({ key, loading: false, error: error.message, config: "", auth: "", missing: false });
+          setProviderFiles({ key, loading: false, error: error instanceof Error ? error.message : String(error), config: "", auth: "", missing: false });
         }
       }
     }
@@ -631,7 +528,7 @@ function App() {
     codexHome
   ]);
 
-  async function runMutation(action, payload, success) {
+  async function runMutation(action: ActionName, payload: JsonRecord, success: string): Promise<boolean> {
     try {
       if (MUTATIONS_REQUIRING_CODEX_CLOSED.has(action) && !(await ensureCodexClosed(() => runMutation(action, payload, success)))) return false;
       await invoke(action, { codexHome, ...payload, confirmed: true });
@@ -640,14 +537,14 @@ function App() {
       await loadAll();
       return true;
     } catch (error) {
-      notify(error.message);
+      notify(error instanceof Error ? error.message : String(error));
       return false;
     }
   }
 
-  async function ensureCodexClosed(onContinue) {
-    const status = await invoke("codex:processStatus", { codexHome });
-    if (!status.running) return true;
+  async function ensureCodexClosed(onContinue: () => Promise<unknown> | unknown): Promise<boolean> {
+    const processStatus = await invoke("codex:processStatus", { codexHome }) as ProcessStatus;
+    if (!processStatus.running) return true;
     setModal({
       title: "Quit Codex Desktop?",
       body: [
@@ -655,7 +552,7 @@ function App() {
         "",
         "This operation writes local Codex files or SQLite state. Close Codex first so it does not keep stale state in memory.",
         "",
-        `Running process: ${status.processes.map((proc) => proc.pid).join(", ")}`
+        `Running process: ${processStatus.processes.map((proc) => proc.pid).join(", ")}`
       ].join("\n"),
       confirmLabel: "Quit and continue",
       tone: "primary",
@@ -666,7 +563,7 @@ function App() {
           setModal(null);
           await onContinue();
         } catch (error) {
-          notify(error.message);
+          notify(error instanceof Error ? error.message : String(error));
         }
       }
     });
@@ -676,13 +573,13 @@ function App() {
   async function waitForCodexToQuit() {
     for (let attempt = 0; attempt < 20; attempt += 1) {
       await new Promise((resolve) => window.setTimeout(resolve, 300));
-      const status = await invoke("codex:processStatus", { codexHome });
-      if (!status.running) return;
+      const processStatus = await invoke("codex:processStatus", { codexHome }) as ProcessStatus;
+      if (!processStatus.running) return;
     }
     throw new Error("Codex Desktop is still running. Quit it manually and try again.");
   }
 
-  async function openProfileEditor(profile) {
+  async function openProfileEditor(profile: ProviderProfile): Promise<void> {
     try {
       const [configFile, authFile] = await Promise.all([
         invoke("profile:file:get", { codexHome, profileId: profile.id, file: "config" }),
@@ -694,7 +591,7 @@ function App() {
         drafts: { config: configFile.raw ?? "", auth: authFile.raw ?? "" }
       });
     } catch (error) {
-      notify(error.message);
+      notify(error instanceof Error ? error.message : String(error));
     }
   }
 
@@ -722,11 +619,11 @@ function App() {
       notify("Profile saved");
       await loadAll();
     } catch (error) {
-      notify(error.message);
+      notify(error instanceof Error ? error.message : String(error));
     }
   }
 
-  async function createNewProvider(event) {
+  async function createNewProvider(event: FormEvent<HTMLFormElement>): Promise<void> {
     event.preventDefault();
     try {
       const providerPayload = {
@@ -745,11 +642,11 @@ function App() {
       setModal(null);
       await loadAll();
     } catch (error) {
-      notify(error.message);
+      notify(error instanceof Error ? error.message : String(error));
     }
   }
 
-  function selectView(nextView) {
+  function selectView(nextView: View): void {
     setView(nextView);
     if (nextView !== "chats") {
       setSelectedProject("");
@@ -758,13 +655,13 @@ function App() {
     if (nextView !== "providers") setSelectedProvider("");
   }
 
-  function startResize(which, event) {
+  function startResize(which: "sidebar" | "detail", event: ReactMouseEvent<HTMLButtonElement>): void {
     event.preventDefault();
     const startX = event.clientX;
     const startSidebar = sidebarWidth;
     const startDetail = detailWidth;
 
-    function onMove(moveEvent) {
+    function onMove(moveEvent: MouseEvent): void {
       if (which === "sidebar") {
         const next = clamp(startSidebar + moveEvent.clientX - startX, 168, 360);
         setSidebarWidth(next);
@@ -776,7 +673,7 @@ function App() {
       }
     }
 
-    function onUp() {
+    function onUp(): void {
       window.removeEventListener("mousemove", onMove);
       window.removeEventListener("mouseup", onUp);
       document.body.classList.remove("resizing");
@@ -788,7 +685,7 @@ function App() {
   }
 
   return (
-    <div className="shell" style={{ "--sidebar-width": `${sidebarWidth}px`, "--detail-width": `${detailWidth}px` }}>
+    <div className="shell" style={{ "--sidebar-width": `${sidebarWidth}px`, "--detail-width": `${detailWidth}px` } as ShellStyle}>
       <aside className="sidebar">
         <div className="traffic-space" />
         <div className="brand">
@@ -800,6 +697,9 @@ function App() {
         </button>
         <button className={`nav ${view === "providers" ? "active" : ""}`} onClick={() => selectView("providers")} type="button">
           <KeyRound size={16} /> Providers
+        </button>
+        <button className={`nav ${view === "sync" ? "active" : ""}`} onClick={() => selectView("sync")} type="button">
+          <Shield size={16} /> Sync
         </button>
         <button className={`nav ${view === "backups" ? "active" : ""}`} onClick={() => selectView("backups")} type="button">
           <ArchiveRestore size={16} /> Backups
@@ -845,7 +745,6 @@ function App() {
             <Search size={15} />
             <input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search chats, projects, providers" />
           </div>
-          <label className="toggle"><input checked={archived} onChange={(event) => setArchived(event.target.checked)} type="checkbox" /> Archived</label>
           <button className="icon-button" onClick={loadAll} title="Refresh" type="button"><RefreshCw size={16} className={busy ? "spin" : ""} /></button>
           <button className="icon-button" onClick={() => selectView("settings")} title="Settings" type="button"><Settings size={16} /></button>
         </header>
@@ -856,6 +755,10 @@ function App() {
               <>
                 <div className="pane-head">
                   <div><h1>Chats</h1><p>{visibleThreads.length} shown · {status?.totals?.threads ?? 0} total · db {status?.integrity ?? "-"}</p></div>
+                  <div className="pane-actions segmented thread-state-control" role="group" aria-label="Chat state">
+                    <button className={!archived ? "active" : ""} onClick={() => setArchived(false)} type="button">Active</button>
+                    <button className={archived ? "active" : ""} onClick={() => setArchived(true)} type="button">Archived</button>
+                  </div>
                 </div>
                 <div className="rows">
                   {visibleThreads.map((thread) => (
@@ -886,6 +789,26 @@ function App() {
                         <span>{item.summary?.provider ?? "-"} · {item.summary?.baseUrl ?? "-"} · {item.summary?.model ?? "-"}</span>
                       </div>
                       {item.active ? <span className="badge ok">active</span> : <ChevronRight size={15} />}
+                    </button>
+                  ))}
+                </div>
+              </>
+            )}
+
+            {view === "sync" && (
+              <>
+                <div className="pane-head">
+                  <div><h1>Sync</h1><p>{repairCount + retagCount} pending · active {activeProvider || "-"}</p></div>
+                  <button className="help-button" onClick={() => setModal({ title: "Sync modes", body: ["Repair mismatches updates only chats where SQLite and rollout metadata disagree. It keeps each chat on its original provider tag.", "", "Retag all changes every chat outside the active provider to the current provider id. This makes hidden chats visible here, but overwrites previous provider tags.", "", "Both modes create a restorable backup first."].join("\n"), confirmLabel: "Close", tone: "primary", hideCancel: true, action: () => setModal(null) })} title="Sync modes" type="button"><Info size={14} /></button>
+                </div>
+                <div className="rows">
+                  {syncItems.map((item) => (
+                    <button className={`row ${selectedSyncMode === item.id ? "selected" : ""}`} key={item.id} onClick={() => setSelectedSyncMode(item.id)} type="button">
+                      <div className="row-main">
+                        <strong>{item.title}</strong>
+                        <span>{item.subtitle}</span>
+                      </div>
+                      <span className={`badge ${item.count ? "warn" : "ok"}`}>{item.count}</span>
                     </button>
                   ))}
                 </div>
@@ -973,7 +896,22 @@ function App() {
               <ThreadDetail thread={selectedThread} selectedProject={selectedProject} onDeleteThread={() => setModal({ title: "Delete chat", body: `${selectedThread.title || "(untitled)"}\n${shortPath(selectedThread.cwd)}`, confirmLabel: "Delete", tone: "danger", action: () => runMutation("thread:trash", { threadId: selectedThread.id }, "Chat moved to backup") })} onDeleteProject={() => selectedProject && setModal({ title: "Delete project", body: `${shortPath(selectedProject)}\nAll exact-cwd chats move into a restorable backup.`, confirmLabel: "Delete", tone: "danger", action: () => runMutation("project:delete", { project: selectedProject }, "Project deleted") })} />
             )}
             {view === "providers" && (
-              <ProviderDetail item={selectedProviderItem} config={config} repairCount={repairCount} retagCount={retagCount} files={providerFiles} expandedFiles={expandedFiles} setExpandedFiles={setExpandedFiles} onUseOfficial={() => setModal({ title: "Switch to OpenAI Official", body: officialSwitchMessage(config?.officialAuthSnapshot), confirmLabel: "Switch", tone: "primary", action: () => runMutation("provider:useOfficial", {}, "Switched to OpenAI Official") })} onUseProfile={(profile) => setModal({ title: `Switch to ${profile.label}`, body: profile.hasAuth ? "This writes config.toml and auth.json from the profile snapshot." : "This writes config.toml. auth.json is unchanged.", confirmLabel: "Switch", tone: "primary", action: () => runMutation("profile:switch", { profileId: profile.id }, "Profile switched") })} onEdit={openProfileEditor} onDelete={(profile) => setModal({ title: "Delete profile", body: `Delete saved profile \"${profile.label}\"?`, confirmLabel: "Delete", tone: "danger", action: () => runMutation("profile:delete", { id: profile.id }, "Profile deleted") })} onExplainSync={() => setModal({ title: "Sync modes", body: ["Repair mismatches updates only chats where SQLite and rollout metadata disagree. It keeps each chat on its original provider tag.", "", "Retag all changes every chat outside the active provider to the current provider id. This makes hidden chats visible here, but overwrites previous provider tags.", "", "Both modes create a restorable backup first."].join("\n"), confirmLabel: "Close", tone: "primary", hideCancel: true, action: () => setModal(null) })} onRepair={() => setModal({ title: "Repair provider mismatches", body: `Repair ${repairCount} chat(s). This does not merge provider tags.`, confirmLabel: "Repair", tone: "primary", action: () => runMutation("config:sync", { mode: "repair" }, "Provider mismatches repaired") })} onRetag={() => setModal({ title: "Retag all chats", body: `Retag ${retagCount} chat(s) to ${activeProvider}. Previous provider tags will be overwritten.`, confirmLabel: "Retag", tone: "danger", action: () => runMutation("config:sync", { mode: "retag" }, "Chats retagged") })} />
+              <ProviderDetail item={selectedProviderItem} config={config} files={providerFiles} expandedFiles={expandedFiles} setExpandedFiles={setExpandedFiles} onUseOfficial={() => setModal({ title: "Switch to OpenAI Official", body: officialSwitchMessage(config?.officialAuthSnapshot), confirmLabel: "Switch", tone: "primary", action: () => runMutation("provider:useOfficial", {}, "Switched to OpenAI Official") })} onUseProfile={(profile) => setModal({ title: `Switch to ${profile.label}`, body: profile.hasAuth ? "This writes config.toml and auth.json from the profile snapshot." : "This writes config.toml. auth.json is unchanged.", confirmLabel: "Switch", tone: "primary", action: () => runMutation("profile:switch", { profileId: profile.id }, "Profile switched") })} onEdit={openProfileEditor} onDelete={(profile) => setModal({ title: "Delete profile", body: `Delete saved profile \"${profile.label}\"?`, confirmLabel: "Delete", tone: "danger", action: () => runMutation("profile:delete", { id: profile.id }, "Profile deleted") })} />
+            )}
+            {view === "sync" && (
+              <SyncDetail
+                item={selectedSyncItem}
+                activeProvider={activeProvider}
+                onRun={(item) => setModal({
+                  title: item.id === "repair" ? "Repair provider mismatches" : "Retag all chats",
+                  body: item.id === "repair"
+                    ? `Repair ${item.count} chat(s). This does not merge provider tags.`
+                    : `Retag ${item.count} chat(s) to ${activeProvider}. Previous provider tags will be overwritten.`,
+                  confirmLabel: item.id === "repair" ? "Repair" : "Retag",
+                  tone: item.tone,
+                  action: () => runMutation("config:sync", { mode: item.id }, item.id === "repair" ? "Provider mismatches repaired" : "Chats retagged")
+                })}
+              />
             )}
             {view === "backups" && (
               <BackupDetail
@@ -1001,352 +939,6 @@ function App() {
   );
 }
 
-function BackupDetail({ backup, activeProvider, onRestore }) {
-  if (!backup) {
-    return <div className="detail-empty"><ArchiveRestore size={28} /><p>Select a backup.</p></div>;
-  }
-  const fileNames = backupFilesSummary(backup.files);
-  const primaryScope = backup.category === "chats"
-    ? "chats"
-    : backup.category === "sync"
-      ? "metadata"
-      : "config";
-  const scopes = new Set(backup.scopes ?? [primaryScope]);
-  const chats = backup.chatSummaries ?? [];
-  const firstChat = chats[0] ?? null;
-  return (
-    <div className="detail backup-detail">
-      <div className="detail-title">
-        <h2>{backupTitle(backup)}</h2>
-        <span className="badge">{backupKindLabel(backup)}</span>
-      </div>
-      <div className="kv">
-        <span>Created</span><strong>{formatBackupDate(backup.createdAt)}</strong>
-        <span>Kind</span><strong>{backupKindLabel(backup)}</strong>
-        <span>Subject</span><strong>{backupSubjectLabel(backup)}</strong>
-        <span>Chats</span><strong>{backup.threadIds?.length ?? 0}</strong>
-        {backup.category === "chats" && firstChat && (
-          <>
-            <span>{backup.projectRoot ? "Sample chat" : "Location"}</span><strong>{backup.projectRoot ? firstChat.title || firstChat.id : backupChatLocation(firstChat, backup)}</strong>
-            <span>Provider then</span><strong>{firstChat.model_provider || "-"}</strong>
-            <span>Updated</span><strong>{formatDate(firstChat.updated_at)}</strong>
-          </>
-        )}
-        {backup.category !== "chats" && (
-          <>
-            <span>Files</span><strong>{fileNames.length ? fileNames.join(", ") : "-"}</strong>
-            <span>Path</span><strong>{shortPath(backup.path)}</strong>
-          </>
-        )}
-      </div>
-
-      <div className="backup-note">
-        {backup.category === "chats" && `Chat restore brings deleted chats back and aligns them to the current active provider (${activeProvider || "-"}), so later provider sync state is preserved.`}
-        {backup.category === "providers" && "Config restore writes only config.toml and auth.json. Chats, project state, and provider tags stay as they are."}
-        {backup.category === "sync" && "Metadata restore rolls selected chat provider tags back to this snapshot. Use it when a sync/retag operation should be undone."}
-      </div>
-
-      {backup.category === "chats" && (
-        <div className="backup-chat-list">
-          <div className="sync-title">Chats in this backup</div>
-          {chats.map((thread) => (
-            <div className="backup-chat-row" key={thread.id}>
-              <strong>{thread.title || "(untitled)"}</strong>
-              <span>{backupChatLocation(thread, backup)} · {thread.model_provider || "-"} · {formatDate(thread.updated_at)}</span>
-              <p>{thread.preview || thread.first_user_message || thread.id}</p>
-            </div>
-          ))}
-          {!chats.length && <div className="file-empty">No chat summary in this backup.</div>}
-        </div>
-      )}
-
-      <div className="backup-actions">
-        {scopes.has(primaryScope) && (
-          <button className="primary wide" onClick={() => onRestore(primaryScope)} type="button">
-            <ArchiveRestore size={15} /> {backupScopeLabel(primaryScope)}
-          </button>
-        )}
-      </div>
-
-      {backup.category !== "chats" && (
-        <section className="file-disclosure">
-          <div className="file-toggle static">
-            <ArchiveRestore size={14} />
-            <span>metadata</span>
-            <strong>{backup.reason || backup.name}</strong>
-          </div>
-          <pre className="file-preview compact-preview">{JSON.stringify({
-            reason: backup.reason,
-            scopes: backup.scopes,
-            files: backup.files,
-            threadIds: backup.threadIds
-          }, null, 2)}</pre>
-        </section>
-      )}
-    </div>
-  );
-}
-
-function ThreadDetail({ thread, selectedProject, onDeleteThread, onDeleteProject }) {
-  const hasProject = Boolean(selectedProject);
-  return (
-    <div className="detail">
-      <h2>{thread.title || "(untitled)"}</h2>
-      <div className="kv"><span>ID</span><strong>{thread.id}</strong><span>Project</span><strong>{shortPath(thread.cwd)}</strong><span>Provider</span><strong>{thread.model_provider}</strong><span>Updated</span><strong>{formatDate(thread.updated_at)}</strong><span>Preview</span><strong>{thread.preview || thread.first_user_message || "-"}</strong></div>
-      <div className="danger-zone">
-        <button className="danger" onClick={onDeleteThread} type="button"><Trash2 size={15} /> Delete chat</button>
-        <button className="danger ghost" onClick={onDeleteProject} disabled={!hasProject} type="button"><Trash2 size={15} /> Delete project</button>
-      </div>
-    </div>
-  );
-}
-
-function ProviderDetail({
-  item,
-  config,
-  repairCount,
-  retagCount,
-  files,
-  expandedFiles,
-  setExpandedFiles,
-  onUseOfficial,
-  onUseProfile,
-  onEdit,
-  onDelete,
-  onExplainSync,
-  onRepair,
-  onRetag
-}) {
-  if (!item) {
-    return <div className="detail-empty"><KeyRound size={28} /><p>Select a provider.</p></div>;
-  }
-
-  const isOfficial = item.id === "official";
-  const profile = item.profile;
-  const summary = item.summary ?? {};
-  const officialSnapshot = config?.officialAuthSnapshot;
-  const snapshotLabel = officialSnapshot?.available
-    ? `${officialSnapshot.label}${officialSnapshot.autoManaged ? " (auto)" : ""}${officialSnapshot.source === "backup" ? " (backup config)" : ""}`
-    : "not saved";
-  return (
-    <div className="detail">
-      <div className="detail-title">
-        <h2>{item.title}</h2>
-        <span className="badge">{item.badge}</span>
-        {item.active && <span className="badge ok"><Check size={12} /> active</span>}
-      </div>
-      <div className="kv">
-        <span>Provider</span><strong>{summary.provider ?? "-"}</strong>
-        <span>Base URL</span><strong>{summary.baseUrl ?? "-"}</strong>
-        <span>Model</span><strong>{summary.model ?? config?.model ?? "-"}</strong>
-        <span>Auth</span><strong>{isOfficial ? `OpenAI login (${config?.auth?.mode ?? "?"})` : profile?.hasAuth ? "profile auth snapshot" : "bearer token / unchanged auth"}</strong>
-        {isOfficial && <><span>Snapshot</span><strong>{snapshotLabel}</strong></>}
-        <span>Active config</span><strong>{config?.modelProvider ?? "-"}</strong>
-        <span>Bearer</span><strong>{config?.bearer?.present ? config.bearer.masked : "none"}</strong>
-      </div>
-      <div className="actions">
-        {isOfficial ? (
-          <button className="primary" onClick={onUseOfficial} disabled={item.active} type="button">Use</button>
-        ) : (
-          <>
-            <button className="primary" onClick={() => onUseProfile(profile)} disabled={item.active} type="button">Use</button>
-            <button onClick={() => onEdit(profile)} type="button">Edit</button>
-            <button className="danger-text" onClick={() => onDelete(profile)} type="button">Delete</button>
-          </>
-        )}
-      </div>
-      <ProviderFiles files={files} expandedFiles={expandedFiles} setExpandedFiles={setExpandedFiles} isOfficial={isOfficial} />
-      <div className="sync-panel">
-        <div className="sync-title">
-          <span>Provider metadata</span>
-          <button className="help-button" onClick={onExplainSync} title="Sync modes" type="button"><Info size={14} /></button>
-        </div>
-        <div className="sync-actions">
-          <button onClick={onRepair} disabled={!repairCount} type="button"><Shield size={15} /> Repair mismatches</button>
-          <button className="primary" onClick={onRetag} disabled={!retagCount} type="button"><Shield size={15} /> Retag all chats</button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function ProviderFiles({ files, expandedFiles, setExpandedFiles, isOfficial }) {
-  function toggle(file) {
-    setExpandedFiles({ ...expandedFiles, [file]: !expandedFiles[file] });
-  }
-
-  if (files?.loading) {
-    return <div className="file-panel"><div className="file-empty">Loading provider files...</div></div>;
-  }
-  if (files?.error) {
-    return <div className="file-panel"><div className="file-empty">{files.error}</div></div>;
-  }
-  if (files?.missing) {
-    return <div className="file-panel"><div className="file-empty">{isOfficial ? "No OpenAI Official config found in profiles or backups." : "No profile files found."}</div></div>;
-  }
-
-  return (
-    <div className="file-panel">
-      {isOfficial && files?.source === "backup" && (
-        <div className="file-empty">
-          Backup config: {files.label || "backup"}
-          {files.authSource === "current" ? " · current auth.json" : files.hasAuth ? " · auth.json" : ""}
-        </div>
-      )}
-      {isOfficial && files?.source === "profile" && (
-        <div className="file-empty">Using {files.autoManaged ? "auto-saved" : "saved"} official profile snapshot: {files.label || "profile"}</div>
-      )}
-      <FileDisclosure title="config.toml" value={files?.config ?? ""} expanded={expandedFiles.config} onToggle={() => toggle("config")} />
-      <FileDisclosure title="auth.json" value={files?.auth ?? ""} expanded={expandedFiles.auth} onToggle={() => toggle("auth")} />
-    </div>
-  );
-}
-
-function FileDisclosure({ title, value, expanded, onToggle }) {
-  return (
-    <section className="file-disclosure">
-      <button className="file-toggle" onClick={onToggle} type="button">
-        <ChevronRight className={expanded ? "expanded" : ""} size={14} />
-        <span>{title}</span>
-        <strong>{value ? `${value.length} bytes` : "empty"}</strong>
-      </button>
-      {expanded && <pre className="file-preview">{value || "(empty)"}</pre>}
-    </section>
-  );
-}
-
-function providerIdFromLabel(value) {
-  return String(value ?? "")
-    .trim()
-    .toLowerCase()
-    .replace(/[^a-z0-9._-]+/g, "-")
-    .replace(/^-+|-+$/g, "")
-    .slice(0, 48);
-}
-
-function defaultProviderConfig(providerId) {
-  const safeProviderId = providerId || "custom";
-  return [
-    `model_provider = "${safeProviderId}"`,
-    'model = "gpt-5.5"',
-    "",
-    `[model_providers.${safeProviderId}]`,
-    `name = "${safeProviderId}"`,
-    'base_url = "https://api.example.com/v1"',
-    'wire_api = "responses"',
-    ""
-  ].join("\n");
-}
-
-function updateProviderIdInDraftConfig(configText, previousId, nextId) {
-  const oldId = previousId || "custom";
-  const safeNextId = nextId || "custom";
-  const oldConfig = defaultProviderConfig(oldId);
-  if (!configText || configText === oldConfig) return defaultProviderConfig(safeNextId);
-  return configText;
-}
-
-function defaultProviderAuth() {
-  return `${JSON.stringify({ OPENAI_API_KEY: "" }, null, 2)}\n`;
-}
-
-function NewProviderModal({ draft, setDraft, onCancel, onSubmit }) {
-  const defaultId = providerIdFromLabel(draft.label) || "custom";
-  const configText = draft.configText || defaultProviderConfig(defaultId);
-  const authText = draft.authText || defaultProviderAuth();
-  const providerId = providerIdFromConfig(configText);
-
-  function update(patch) {
-    setDraft({ ...draft, ...patch });
-  }
-
-  function updateLabel(value) {
-    const previousId = providerIdFromLabel(draft.label) || "custom";
-    const nextProviderId = providerIdFromLabel(value) || "custom";
-    update({
-      label: value,
-      configText: updateProviderIdInDraftConfig(draft.configText, previousId, nextProviderId)
-    });
-  }
-
-  return (
-    <div className="modal">
-      <form className="modal-card provider-modal" onSubmit={onSubmit}>
-        <div className="modal-title">
-          <h2>New Codex provider</h2>
-          <span className="badge">profile files</span>
-        </div>
-        <div className="provider-form-scroll">
-          <div className="form-grid">
-            <label className="field">
-              <span>Name</span>
-              <input value={draft.label} onChange={(event) => updateLabel(event.target.value)} placeholder="Axis" required />
-            </label>
-            <label className="field">
-              <span>Provider ID</span>
-              <input value={providerId} placeholder="from config.toml" readOnly />
-            </label>
-          </div>
-          <label className="field">
-            <span>config.toml</span>
-            <textarea className="raw-editor" value={configText} onChange={(event) => update({ configText: event.target.value })} spellCheck="false" required />
-          </label>
-          <label className="field">
-            <span>auth.json</span>
-            <textarea className="raw-editor auth-editor" value={authText} onChange={(event) => update({ authText: event.target.value })} spellCheck="false" />
-          </label>
-          <div className="switch-row">
-            <label><input checked={draft.switch} onChange={(event) => update({ switch: event.target.checked })} type="checkbox" /> use immediately</label>
-          </div>
-        </div>
-        <div className="actions end">
-          <button onClick={onCancel} type="button">Cancel</button>
-          <button className="primary" type="submit"><Plus size={15} /> Create</button>
-        </div>
-      </form>
-    </div>
-  );
-}
-
-function StatusPanel({ status }) {
-  return <div className="detail"><h2>Status</h2><div className="kv"><span>Codex home</span><strong>{status?.codexHome ?? "-"}</strong><span>SQLite</span><strong>{status?.integrity ?? "-"}</strong><span>Rollouts</span><strong>{status?.rolloutFiles ?? 0}</strong></div></div>;
-}
-
-function ConfirmModal({ modal, onCancel }) {
-  const tone = modal.tone === "danger" ? "danger" : "primary";
-  return (
-    <div className="modal">
-      <div className="modal-card">
-        <h2>{modal.title}</h2>
-        <pre>{modal.body}</pre>
-        <div className="actions end">
-          {!modal.hideCancel && <button onClick={onCancel} type="button">Cancel</button>}
-          <button className={tone} onClick={modal.action} type="button">{modal.confirmLabel ?? "Confirm"}</button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function ProfileEditor({ editor, setEditor, onCancel, onSave }) {
-  const value = editor.drafts[editor.tab] ?? "";
-  const providerId = providerIdFromConfig(editor.drafts.config);
-  return (
-    <div className="modal">
-      <div className="modal-card editor">
-        <h2>Edit {editor.profile.label}</h2>
-        <div className="segmented"><button className={editor.tab === "config" ? "active" : ""} onClick={() => setEditor({ ...editor, tab: "config" })} type="button">config.toml</button><button className={editor.tab === "auth" ? "active" : ""} onClick={() => setEditor({ ...editor, tab: "auth" })} type="button">auth.json</button></div>
-        {editor.tab === "config" && (
-          <label className="field">
-            <span>Provider ID</span>
-            <input value={providerId} placeholder="from config.toml" readOnly />
-          </label>
-        )}
-        <textarea value={value} onChange={(event) => setEditor({ ...editor, drafts: { ...editor.drafts, [editor.tab]: event.target.value } })} spellCheck="false" />
-        <div className="actions end"><button onClick={onCancel} type="button">Cancel</button><button className="primary" onClick={onSave} type="button">Save</button></div>
-      </div>
-    </div>
-  );
-}
-
-createRoot(document.getElementById("root")).render(<App />);
+const rootElement = document.getElementById("root");
+if (!rootElement) throw new Error("Missing #root element");
+createRoot(rootElement).render(<App />);
