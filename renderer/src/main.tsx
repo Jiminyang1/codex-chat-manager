@@ -1,10 +1,9 @@
-import { useEffect, useMemo, useState, type CSSProperties, type FormEvent, type MouseEvent as ReactMouseEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type CSSProperties, type FormEvent, type MouseEvent as ReactMouseEvent } from "react";
 import { createRoot } from "react-dom/client";
 import {
   ArchiveRestore,
   ChevronRight,
   Folder,
-  Info,
   KeyRound,
   Monitor,
   Moon,
@@ -120,7 +119,7 @@ const MUTATIONS_REQUIRING_CODEX_CLOSED = new Set<ActionName>([
 const BACKUP_CATEGORIES = [
   { id: "chats", title: "Chats / Projects", label: "Chats", icon: Folder },
   { id: "providers", title: "Config History", label: "Config", icon: KeyRound },
-  { id: "sync", title: "Sync / Metadata", label: "Sync", icon: Shield }
+  { id: "sync", title: "Chat Sync History", label: "Chat Sync", icon: Shield }
  ] as const;
 
 const THEME_STORAGE_KEY = "appearance.theme";
@@ -165,13 +164,14 @@ function App() {
   const [selectedProjectlessThreadId, setSelectedProjectlessThreadId] = useState("");
   const [selectedProvider, setSelectedProvider] = useState("");
   const [selectedThreadId, setSelectedThreadId] = useState("");
-  const [selectedSyncMode, setSelectedSyncMode] = useState<SyncMode>("repair");
+  const [selectedSyncMode, setSelectedSyncMode] = useState<SyncMode>("retag");
   const [backupCategory, setBackupCategory] = useState<BackupCategory>("chats");
   const [selectedBackupPath, setSelectedBackupPath] = useState("");
   const [view, setView] = useState<View>("chats");
   const [search, setSearch] = useState("");
   const [archived, setArchived] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [runningAction, setRunningAction] = useState<ActionName | "">("");
   const [toast, setToast] = useState("");
   const [modal, setModal] = useState<ModalState>(null);
   const [profileSummaries, setProfileSummaries] = useState<Record<string, JsonRecord | null>>({});
@@ -189,14 +189,7 @@ function App() {
   const [sidebarWidth, setSidebarWidth] = useState(() => storedNumber("layout.sidebarWidth", 236));
   const [detailWidth, setDetailWidth] = useState(() => storedNumber("layout.detailWidth", 360));
   const [themePreference, setThemePreference] = useState(storedThemePreference);
-
-  const providers = useMemo<[string, number][]>(() => {
-    const counts = new Map<string, number>();
-    for (const row of status?.sqliteProviders ?? []) {
-      counts.set(row.model_provider, (counts.get(row.model_provider) ?? 0) + Number(row.count || 0));
-    }
-    return [...counts.entries()].sort((a, b) => b[1] - a[1]);
-  }, [status]);
+  const runningActionRef = useRef<ActionName | "">("");
 
   const filteredProjectThreads = useMemo(() => {
     const text = search.trim().toLowerCase();
@@ -227,32 +220,36 @@ function App() {
     ?? visibleThreads[0]
     ?? null;
   const activeProvider = config?.modelProvider ?? "";
-  const retagCount = status?.activeProvider === activeProvider && Number.isFinite(status?.providerSyncMismatchCount)
+  const retagCount = status && activeProvider && Number.isFinite(status.providerSyncMismatchCount)
     ? status.providerSyncMismatchCount
-    : providers.filter(([provider]) => provider !== activeProvider).reduce((sum, [, count]) => sum + count, 0);
+    : 0;
+  const retagGroups = status?.providerSyncMismatchGroups ?? [];
   const repairCount = status && Number.isFinite(status.providerRepairMismatchCount) ? status.providerRepairMismatchCount : 0;
+  const syncAttentionCount = repairCount + retagCount;
   const syncItems = useMemo<SyncItem[]>(() => [
     {
-      id: "repair",
-      title: "Repair mismatches",
-      count: repairCount,
-      subtitle: "Fix SQLite / rollout metadata disagreements",
-      description: "Updates only chats where SQLite and rollout metadata disagree. It keeps each chat on its original provider tag.",
-      actionLabel: "Repair mismatches",
-      tone: "primary",
-      groups: status?.providerRepairMismatchGroups ?? []
+      id: "retag",
+      title: "Sync chats to current provider",
+      count: retagCount,
+      subtitle: activeProvider ? `${retagCount} chat${retagCount === 1 ? "" : "s"} outside ${activeProvider}` : "No current provider detected",
+      description: activeProvider
+        ? `Current provider is ${activeProvider}. These chats have another provider tag and may be hidden until synced.`
+        : "Set a current provider before syncing chats.",
+      actionLabel: "Sync chats",
+      tone: "danger",
+      groups: retagGroups
     },
     {
-      id: "retag",
-      title: "Retag to active provider",
-      count: retagCount,
-      subtitle: activeProvider ? `Move non-${activeProvider} chats to ${activeProvider}` : "No active provider detected",
-      description: "Changes every chat outside the active provider to the current provider id. This makes hidden chats visible here, but overwrites previous provider tags.",
-      actionLabel: "Retag all chats",
-      tone: "danger",
-      groups: status?.providerSyncMismatchGroups ?? []
+      id: "repair",
+      title: "Conflicting provider tags",
+      count: repairCount,
+      subtitle: "Repair SQLite / rollout disagreements",
+      description: "Fix provider tag conflicts without merging chats into another provider.",
+      actionLabel: "Fix conflicts",
+      tone: "primary",
+      groups: status?.providerRepairMismatchGroups ?? []
     }
-  ], [activeProvider, repairCount, retagCount, status]);
+  ], [activeProvider, repairCount, retagCount, retagGroups, status]);
   const selectedSyncItem = syncItems.find((item) => item.id === selectedSyncMode) ?? syncItems[0];
   const providerItems = useMemo<ProviderItem[]>(() => [
     {
@@ -529,16 +526,22 @@ function App() {
   ]);
 
   async function runMutation(action: ActionName, payload: JsonRecord, success: string): Promise<boolean> {
+    if (runningActionRef.current) return false;
+    runningActionRef.current = action;
+    setRunningAction(action);
     try {
       if (MUTATIONS_REQUIRING_CODEX_CLOSED.has(action) && !(await ensureCodexClosed(() => runMutation(action, payload, success)))) return false;
-      await invoke(action, { codexHome, ...payload, confirmed: true });
+      const result = await invoke(action, { codexHome, ...payload, confirmed: true }) as JsonRecord;
       setModal(null);
-      notify(success);
+      notify(result?.noOp ? "Already up to date" : success);
       await loadAll();
       return true;
     } catch (error) {
       notify(error instanceof Error ? error.message : String(error));
       return false;
+    } finally {
+      runningActionRef.current = "";
+      setRunningAction("");
     }
   }
 
@@ -699,7 +702,7 @@ function App() {
           <KeyRound size={16} /> Providers
         </button>
         <button className={`nav ${view === "sync" ? "active" : ""}`} onClick={() => selectView("sync")} type="button">
-          <Shield size={16} /> Sync
+          <Shield size={16} /> Sync Chat
         </button>
         <button className={`nav ${view === "backups" ? "active" : ""}`} onClick={() => selectView("backups")} type="button">
           <ArchiveRestore size={16} /> Backups
@@ -745,7 +748,7 @@ function App() {
             <Search size={15} />
             <input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search chats, projects, providers" />
           </div>
-          <button className="icon-button" onClick={loadAll} title="Refresh" type="button"><RefreshCw size={16} className={busy ? "spin" : ""} /></button>
+          <button className="icon-button" onClick={loadAll} disabled={busy || Boolean(runningAction)} title="Refresh" type="button"><RefreshCw size={16} className={busy ? "spin" : ""} /></button>
           <button className="icon-button" onClick={() => selectView("settings")} title="Settings" type="button"><Settings size={16} /></button>
         </header>
 
@@ -798,8 +801,10 @@ function App() {
             {view === "sync" && (
               <>
                 <div className="pane-head">
-                  <div><h1>Sync</h1><p>{repairCount + retagCount} pending · active {activeProvider || "-"}</p></div>
-                  <button className="help-button" onClick={() => setModal({ title: "Sync modes", body: ["Repair mismatches updates only chats where SQLite and rollout metadata disagree. It keeps each chat on its original provider tag.", "", "Retag all changes every chat outside the active provider to the current provider id. This makes hidden chats visible here, but overwrites previous provider tags.", "", "Both modes create a restorable backup first."].join("\n"), confirmLabel: "Close", tone: "primary", hideCancel: true, action: () => setModal(null) })} title="Sync modes" type="button"><Info size={14} /></button>
+                  <div>
+                    <h1 className="title-line">Sync Chat <span className="badge beta">Beta</span></h1>
+                    <p>{syncAttentionCount ? `${syncAttentionCount} chats need attention` : "All chat tags are clean"} · active {activeProvider || "-"}</p>
+                  </div>
                 </div>
                 <div className="rows">
                   {syncItems.map((item) => (
@@ -896,20 +901,31 @@ function App() {
               <ThreadDetail thread={selectedThread} selectedProject={selectedProject} onDeleteThread={() => setModal({ title: "Delete chat", body: `${selectedThread.title || "(untitled)"}\n${shortPath(selectedThread.cwd)}`, confirmLabel: "Delete", tone: "danger", action: () => runMutation("thread:trash", { threadId: selectedThread.id }, "Chat moved to backup") })} onDeleteProject={() => selectedProject && setModal({ title: "Delete project", body: `${shortPath(selectedProject)}\nAll exact-cwd chats move into a restorable backup.`, confirmLabel: "Delete", tone: "danger", action: () => runMutation("project:delete", { project: selectedProject }, "Project deleted") })} />
             )}
             {view === "providers" && (
-              <ProviderDetail item={selectedProviderItem} config={config} files={providerFiles} expandedFiles={expandedFiles} setExpandedFiles={setExpandedFiles} onUseOfficial={() => setModal({ title: "Switch to OpenAI Official", body: officialSwitchMessage(config?.officialAuthSnapshot), confirmLabel: "Switch", tone: "primary", action: () => runMutation("provider:useOfficial", {}, "Switched to OpenAI Official") })} onUseProfile={(profile) => setModal({ title: `Switch to ${profile.label}`, body: profile.hasAuth ? "This writes config.toml and auth.json from the profile snapshot." : "This writes config.toml. auth.json is unchanged.", confirmLabel: "Switch", tone: "primary", action: () => runMutation("profile:switch", { profileId: profile.id }, "Profile switched") })} onEdit={openProfileEditor} onDelete={(profile) => setModal({ title: "Delete profile", body: `Delete saved profile \"${profile.label}\"?`, confirmLabel: "Delete", tone: "danger", action: () => runMutation("profile:delete", { id: profile.id }, "Profile deleted") })} />
+              <ProviderDetail item={selectedProviderItem} config={config} files={providerFiles} expandedFiles={expandedFiles} setExpandedFiles={setExpandedFiles} onUseOfficial={() => setModal({ title: "Switch to OpenAI Official", body: officialSwitchMessage(config?.officialAuthSnapshot), confirmLabel: "Switch", tone: "primary", action: () => runMutation("provider:useOfficial", {}, "Switched to OpenAI Official") })} onUseProfile={(profile) => setModal({ title: `Switch to ${profile.label}`, body: profile.hasAuth ? "This writes config.toml and auth.json from the profile snapshot." : "This writes config.toml. auth.json is unchanged.", confirmLabel: "Switch", tone: "primary", action: () => runMutation("profile:switch", { profileId: profile.id }, "Profile switched") })} onEdit={openProfileEditor} onDelete={(profile) => setModal({ title: "Delete profile", body: [`Delete saved profile \"${profile.label}\"?`, "", `Provider id: ${profile.providerId || "unknown"}`, "Chats already tagged with this provider are not deleted.", "If this provider id still appears in chat history, Sync Chat can move chats to or away from it later. The saved config/auth snapshot will be removed."].join("\n"), confirmLabel: "Delete", tone: "danger", action: () => runMutation("profile:delete", { id: profile.id }, "Profile deleted") })} />
             )}
             {view === "sync" && (
               <SyncDetail
                 item={selectedSyncItem}
                 activeProvider={activeProvider}
+                working={busy || runningAction === "config:sync"}
                 onRun={(item) => setModal({
-                  title: item.id === "repair" ? "Repair provider mismatches" : "Retag all chats",
+                  title: item.id === "repair" ? "Fix chat tag conflicts" : "Sync chats to current provider",
                   body: item.id === "repair"
-                    ? `Repair ${item.count} chat(s). This does not merge provider tags.`
-                    : `Retag ${item.count} chat(s) to ${activeProvider}. Previous provider tags will be overwritten.`,
-                  confirmLabel: item.id === "repair" ? "Repair" : "Retag",
+                    ? `Fix ${item.count} chat(s) where SQLite and rollout provider tags disagree. Each chat keeps its original provider.`
+                    : [
+                        `Sync ${item.count} chat(s) to the current provider: ${activeProvider || "-"}.`,
+                        "",
+                        `Chats outside ${activeProvider || "the current provider"}: ${item.groups.map((group) => `${group.provider} (${group.count})`).join(", ") || "none"}.`,
+                        "",
+                        "Sync Chat is beta and creates a restorable backup first."
+                      ].join("\n"),
+                  confirmLabel: item.id === "repair" ? "Fix conflicts" : "Sync chats",
                   tone: item.tone,
-                  action: () => runMutation("config:sync", { mode: item.id }, item.id === "repair" ? "Provider mismatches repaired" : "Chats retagged")
+                  action: () => runMutation(
+                    "config:sync",
+                    { mode: item.id },
+                    item.id === "repair" ? "Chat tag conflicts fixed" : "Chats synced to current provider"
+                  )
                 })}
               />
             )}

@@ -12,7 +12,8 @@ import {
   readJsonIfPresent,
   readThreads,
   restoreMutationBackup,
-  timestamp
+  timestamp,
+  writeFilePreservingTimes
 } from "./state.js";
 import { readTextIfPresent, writeTextIfChanged } from "./io.js";
 import {
@@ -767,7 +768,7 @@ async function syncProviderTag(home: string, { toId, execute, mode = "retag" }: 
     }
 
     for (const update of rolloutUpdates) {
-      await fs.writeFile(update.thread.rollout_path, update.content);
+      await writeFilePreservingTimes(update.thread.rollout_path, update.content);
     }
     return {
       dryRun: false,

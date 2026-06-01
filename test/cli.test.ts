@@ -626,6 +626,8 @@ test("config-sync retags mismatched chats to the active provider", async () => {
       model_provider: "OpenAI"
     }
   })}\n{"type":"event_msg","payload":{"type":"user_message"}}\n`);
+  const originalRolloutTime = new Date("2026-05-31T00:00:01.000Z");
+  await fs.utimes(secondRollout, originalRolloutTime, originalRolloutTime);
   const db = new DatabaseSync(path.join(fixture.home, "state_5.sqlite"));
   db.prepare(`
     INSERT INTO threads (
@@ -652,6 +654,40 @@ test("config-sync retags mismatched chats to the active provider", async () => {
   assert.deepEqual(distinct, ["openai"]);
   const secondMeta = JSON.parse((await fs.readFile(secondRollout, "utf8")).split("\n")[0]);
   assert.equal(secondMeta.payload.model_provider, "openai");
+  const secondStat = await fs.stat(secondRollout);
+  assert.equal(Math.trunc(secondStat.mtimeMs / 1000), Math.trunc(originalRolloutTime.getTime() / 1000));
+});
+
+test("config-sync can retag to a deleted provider id when explicitly selected", async () => {
+  const fixture = await makeFixture();
+  const created = await invokeAction("provider:create", {
+    codexHome: fixture.home,
+    label: "Axis",
+    configText: [
+      'model_provider = "axis"',
+      'model = "gpt-5.5"',
+      "",
+      "[model_providers.axis]",
+      'name = "axis"',
+      'base_url = "https://api.axis.fan"',
+      "requires_openai_auth = false",
+      ""
+    ].join("\n")
+  }) as AnyRecord;
+  await invokeAction("profile:delete", { codexHome: fixture.home, id: created.profile.id, confirmed: true });
+
+  const overview = await invokeAction("config:get", { codexHome: fixture.home });
+  assert.equal(overview.profiles.some((profile) => profile.providerId === "axis"), false);
+
+  const preview = await invokeAction("config:sync", { codexHome: fixture.home, mode: "retag", to: "axis" }) as AnyRecord;
+  assert.equal(preview.dryRun, true);
+  assert.equal(preview.target, "axis");
+  assert.equal(preview.total, 1);
+
+  const result = await invokeAction("config:sync", { codexHome: fixture.home, mode: "retag", to: "axis", confirmed: true }) as AnyRecord;
+  assert.equal(result.target, "axis");
+  assert.equal(await readThreadProvider(fixture.home, fixture.threadId), "axis");
+  assert.equal(await readRolloutProvider(fixture.rolloutPath), "axis");
 });
 
 test("config-sync repairs rollout-only provider mismatches", async () => {

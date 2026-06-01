@@ -113,6 +113,12 @@ async function pathExists(filePath: string): Promise<boolean> {
   }
 }
 
+async function writeFilePreservingTimes(filePath: string, content: string): Promise<void> {
+  const stat = await fs.stat(filePath);
+  await fs.writeFile(filePath, content);
+  await fs.utimes(filePath, stat.atime, stat.mtime);
+}
+
 function openDb(home: string, options: any = {}): DatabaseSync {
   const db = new DatabaseSync(dbPath(home), options);
   // Tolerate Codex Desktop holding the DB: wait for the lock instead of failing.
@@ -821,7 +827,7 @@ async function alignThreadsToActiveProvider(home: string, threadIds: unknown): P
     if (!thread.rollout_path || !(await pathExists(thread.rollout_path)) || !isInsideDir(home, thread.rollout_path)) continue;
     const prepared = await prepareRolloutProviderUpdate(thread.rollout_path, target);
     if (!prepared.changed) continue;
-    await fs.writeFile(thread.rollout_path, prepared.content);
+    await writeFilePreservingTimes(thread.rollout_path, prepared.content);
     rolloutUpdated += 1;
   }
   return { target, dbUpdated, rolloutUpdated };
@@ -875,7 +881,7 @@ async function restoreProviderTagsInCopiedRolloutsFromBackup(backupDir: string):
     if (!backupMeta.model_provider) continue;
     const prepared = await prepareRolloutProviderUpdate(rollout.originalPath, backupMeta.model_provider);
     if (!prepared.changed) continue;
-    await fs.writeFile(rollout.originalPath, prepared.content);
+    await writeFilePreservingTimes(rollout.originalPath, prepared.content);
     restored += 1;
   }
   return restored;
@@ -1532,5 +1538,6 @@ export {
   restoreBackup,
   restoreMutationBackup,
   timestamp,
-  trashThreads
+  trashThreads,
+  writeFilePreservingTimes
 };
