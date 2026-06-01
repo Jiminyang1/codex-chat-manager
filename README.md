@@ -1,21 +1,61 @@
-# codex-chat-manager
+# Codex Chat Manager
 
-Small local CLI and Web UI for inspecting and safely managing Codex Desktop chat history.
+![Codex Chat Manager logo](renderer/src/assets/logo.svg)
+
+A local-first workbench for Codex Desktop chat history, provider profiles, backups, and safe recovery workflows.
+
+Codex Chat Manager reads the same local files that Codex Desktop uses, then gives you a denser app UI and CLI for the work that is otherwise hard to inspect: which projects exist, which chats are attached to each provider, what can be restored, and whether chats are hidden because their provider tags no longer match the current provider.
+
+## What It Does
+
+- Browse Codex Desktop chats by project, provider, archived state, and projectless status.
+- Manage provider profiles for `config.toml` and optional `auth.json` snapshots.
+- Switch between saved providers, including OpenAI Official recovery from saved snapshots or backups.
+- Safely trash chats, projects, or provider-specific chat sets with restorable backups.
+- Restore chats, config/auth files, or provider metadata from backup snapshots.
+- Sync chats to the current provider when old provider tags make them disappear from the active Codex view.
+- Repair SQLite / rollout provider tag conflicts without merging chats into another provider.
+
+## Safety Model
+
+This tool only manages local Codex Desktop files. It does not touch remote ChatGPT account state, server-side conversations, or encrypted payload contents.
+
+Mutations are designed to be reversible:
+
+- CLI mutations are dry-run by default; pass `--yes` to execute.
+- The app asks for confirmation before dangerous actions.
+- A backup is created before each mutation under:
+
+  ```text
+  ~/.codex/backups_state/chat-manager/<timestamp>
+  ```
+
+- Rollout file edits preserve original file modification times, so retagging chats does not make every chat look newly updated in Codex Desktop.
+- The tool refuses to mutate a thread whose `threads.rollout_path` points outside the selected `--codex-home`.
+- App mutations check that Codex Desktop is closed before writing local state, so Desktop does not keep stale data in memory.
+
+## Sync Chat Beta
+
+`Sync Chat` is intentionally narrow in the app UI.
+
+The main flow is:
+
+1. Show the current active provider.
+2. Show chats whose provider tag is outside that current provider.
+3. Sync those chats into the current provider so Codex Desktop can see them in the active provider view.
+
+The secondary repair flow fixes conflicts where SQLite and the rollout JSONL disagree about a chat provider. Repair keeps each chat on its original provider instead of merging it into the current provider.
+
+The lower-level CLI/API still supports `config-sync --to <provider-id>` for recovery cases, such as moving chats back to a provider id after its saved profile was deleted. That escape hatch is deliberately not the default app workflow.
 
 ## Install
+
+Requires Node.js `>=24`.
 
 From GitHub:
 
 ```bash
-npm install -g github:<owner>/codex-chat-manager
-codex-chat-manager status
-codex-chat-manager web
-```
-
-From npm, if published there:
-
-```bash
-npm install -g codex-chat-manager
+npm install -g github:Jiminyang1/codex-chat-manager
 codex-chat-manager status
 codex-chat-manager web
 ```
@@ -24,62 +64,20 @@ From a local checkout:
 
 ```bash
 npm install
+npm run build
 npm test
-npm run electron:dev
 ```
 
-This tool understands the current Codex storage model:
-
-- Rollout JSONL files under `~/.codex/sessions` and `~/.codex/archived_sessions` are the conversation source of truth.
-- `~/.codex/state_5.sqlite` indexes chats in the `threads` table.
-- Projects are path-based views derived from `threads.cwd` plus saved roots in `~/.codex/.codex-global-state.json`.
-- `model_provider` is a visibility boundary. A chat can exist but disappear from the current provider view if rollout and SQLite metadata disagree.
-- Projectless chats are tracked through `projectless-thread-ids`, workspace hints, and output-directory maps in `.codex-global-state.json`.
-
-## Safety Model
-
-Mutation commands are dry-run by default. Add `--yes` to execute.
-
-Before any mutation, the tool creates a backup under:
-
-```text
-~/.codex/backups_state/chat-manager/<timestamp>
-```
-
-Trash-style deletion moves rollout files into the backup directory and removes their SQLite rows. It also removes thread references from global state. Hard delete is intentionally not implemented in this MVP.
-
-Close Codex Desktop before running mutation commands for the cleanest result. If it is open, the SQLite write may still succeed, but the UI can keep stale in-memory data until restart.
-
-The tool refuses to mutate a thread if `threads.rollout_path` points outside the selected `--codex-home`. This matters when testing against a copied SQLite database: Codex stores absolute rollout paths, so a fixture copy must rewrite those paths or the tool will stop instead of touching the real home.
-
-## Desktop App
-
-Development app:
+Run the desktop app in development:
 
 ```bash
 npm run electron:dev
 ```
 
-This starts the Vite renderer and opens the Electron app. The desktop app uses an IPC bridge, so it does not depend on the local web server.
-
-Browser build:
+Run the browser workbench:
 
 ```bash
-npm run build:renderer
 npm run web
-```
-
-Then open `http://127.0.0.1:8765`.
-
-## Commands
-
-Web UI, after building the renderer:
-
-```bash
-npm run build:renderer
-npm run web
-# or, after global install:
-codex-chat-manager web
 ```
 
 Then open:
@@ -88,47 +86,129 @@ Then open:
 http://127.0.0.1:8765
 ```
 
-CLI:
+Install from a local package tarball:
+
+```bash
+npm pack --pack-destination dist
+npm install -g ./dist/codex-chat-manager-*.tgz
+```
+
+## CLI Quick Reference
 
 ```bash
 codex-chat-manager status
-codex-chat-manager projects       # or: ps
+codex-chat-manager projects
 codex-chat-manager chats --limit 20
 codex-chat-manager chats --project /Users/me/project --limit 20
 codex-chat-manager chats --provider openai --all
-codex-chat-manager delete-chat <chat-id-prefix>
-codex-chat-manager delete-chat <chat-id-prefix> --yes
-codex-chat-manager delete-project '#3'
-codex-chat-manager delete-project '#3' --yes
-codex-chat-manager trash-provider <provider> --yes
 codex-chat-manager backups
-codex-chat-manager restore '#1' --yes
 ```
 
-`delete-project` always removes the saved project root references and trashes every chat whose `cwd` exactly matches that project path.
-
-CLI output is formatted for humans by default. Use `--json` for scripts. Project and backup tables include `#` references, so you can run commands like `delete-project '#3'` or `restore '#1'`. Chat tables show a short `Ref`; `delete-chat` accepts that short id if it uniquely identifies one chat.
-
-## Important Limits
-
-This is a local metadata/file manager. It does not manage ChatGPT account login, remote server state, or encrypted conversation payloads. If a rollout contains `encrypted_content` from another provider/account, this tool can hide or remove local records, but it cannot make that encrypted content portable.
-
-## Release
-
-Before publishing:
+Safe deletion and restore:
 
 ```bash
+codex-chat-manager delete-chat <chat-id-or-prefix>
+codex-chat-manager delete-chat <chat-id-or-prefix> --yes
+
+codex-chat-manager delete-project '#3'
+codex-chat-manager delete-project '#3' --yes
+
+codex-chat-manager delete-provider <provider-id>
+codex-chat-manager delete-provider <provider-id> --yes
+
+codex-chat-manager restore '#1'
+codex-chat-manager restore '#1' --scope chats --yes
+codex-chat-manager restore '#1' --scope config --yes
+codex-chat-manager restore '#1' --scope metadata --yes
+```
+
+Provider and config workflows:
+
+```bash
+codex-chat-manager config
+codex-chat-manager config-save-profile "Axis"
+codex-chat-manager profile-switch <profile-id>
+codex-chat-manager config-delete-profile <profile-id> --yes
+
+codex-chat-manager config-sync
+codex-chat-manager config-sync --mode repair
+codex-chat-manager config-sync --to <provider-id> --yes
+
+codex-chat-manager config-fix --to openai-custom --yes
+```
+
+Useful global options:
+
+```bash
+--codex-home PATH   Use another Codex home instead of ~/.codex
+--json              Print machine-readable JSON
+--yes               Execute a mutation
+--no-color          Disable ANSI color
+```
+
+## Storage Model
+
+Codex Desktop stores chat state across multiple local layers:
+
+- Rollout JSONL files in `~/.codex/sessions` and `~/.codex/archived_sessions`.
+- SQLite thread index at `~/.codex/state_5.sqlite`.
+- Desktop global state at `~/.codex/.codex-global-state.json`.
+- Provider config and auth files at `~/.codex/config.toml` and `~/.codex/auth.json`.
+
+Important behavior:
+
+- Projects are path-based views derived from `threads.cwd` plus saved roots in global state.
+- `model_provider` is a visibility namespace. A chat can exist locally but disappear from the current provider view when provider metadata is stale or mismatched.
+- Projectless chats are regular threads with extra IDs and output-directory hints in global state.
+
+More detail lives in [docs/storage-model.md](docs/storage-model.md).
+
+## Architecture
+
+This branch moves the project to a stricter app-oriented architecture:
+
+- Node, Electron, tests, and renderer are TypeScript.
+- Zod validates every public action payload at the app boundary.
+- The renderer calls a typed `invoke(action, payload)` API shared with Electron preload and the local web server.
+- Vite builds the React workbench into `dist/renderer`.
+- Node/Electron/CLI code compiles into `dist/node`.
+- Tailwind v4 is available through the Vite plugin, while the current workbench keeps a compact custom CSS surface.
+
+Useful commands:
+
+```bash
+npm run build:node
+npm run typecheck:renderer
 npm run build
 npm test
 npm run pack:check
 ```
 
-For a GitHub release:
+## Limits
+
+- This is not a cloud sync tool.
+- It cannot decrypt or re-encrypt `encrypted_content`.
+- It cannot make provider/account-specific encrypted conversations portable.
+- It does not hard-delete by default; deletion-style actions move data into restorable backups.
+- Sync Chat is beta because provider metadata is a sharp edge in Codex Desktop local state.
+
+## Release
+
+`v0.1.0` already exists. The TypeScript + app workbench refactor should be released as a new version after the PR is merged to `main`, likely `v0.2.0`.
+
+Suggested release flow:
 
 ```bash
-git tag v0.1.0
+git checkout main
+git pull
+npm version minor
+npm run build
+npm test
+npm run pack:check
 git push origin main --tags
 ```
+
+For GitHub Releases, create a release from the new tag and attach the generated tarball if you want a downloadable package artifact.
 
 For npm:
 
