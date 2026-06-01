@@ -25,7 +25,7 @@ From a local checkout:
 ```bash
 npm install
 npm test
-npm run web
+npm run electron:dev
 ```
 
 This tool understands the current Codex storage model:
@@ -52,11 +52,31 @@ Close Codex Desktop before running mutation commands for the cleanest result. If
 
 The tool refuses to mutate a thread if `threads.rollout_path` points outside the selected `--codex-home`. This matters when testing against a copied SQLite database: Codex stores absolute rollout paths, so a fixture copy must rewrite those paths or the tool will stop instead of touching the real home.
 
-## Commands
+## Desktop App
 
-Web UI:
+Development app:
 
 ```bash
+npm run electron:dev
+```
+
+This starts the Vite renderer and opens the Electron app. The desktop app uses an IPC bridge, so it does not depend on the local web server.
+
+Browser build:
+
+```bash
+npm run build:renderer
+npm run web
+```
+
+Then open `http://127.0.0.1:8765`.
+
+## Commands
+
+Web UI, after building the renderer:
+
+```bash
+npm run build:renderer
 npm run web
 # or, after global install:
 codex-chat-manager web
@@ -71,18 +91,18 @@ http://127.0.0.1:8765
 CLI:
 
 ```bash
-node src/cli.js status
-node src/cli.js projects       # or: ps
-node src/cli.js chats --limit 20
-node src/cli.js chats --project /Users/me/project --limit 20
-node src/cli.js chats --provider openai --all
-node src/cli.js delete-chat <chat-id-prefix>
-node src/cli.js delete-chat <chat-id-prefix> --yes
-node src/cli.js delete-project '#3'
-node src/cli.js delete-project '#3' --yes
-node src/cli.js trash-provider <provider> --yes
-node src/cli.js backups
-node src/cli.js restore '#1' --yes
+codex-chat-manager status
+codex-chat-manager projects       # or: ps
+codex-chat-manager chats --limit 20
+codex-chat-manager chats --project /Users/me/project --limit 20
+codex-chat-manager chats --provider openai --all
+codex-chat-manager delete-chat <chat-id-prefix>
+codex-chat-manager delete-chat <chat-id-prefix> --yes
+codex-chat-manager delete-project '#3'
+codex-chat-manager delete-project '#3' --yes
+codex-chat-manager trash-provider <provider> --yes
+codex-chat-manager backups
+codex-chat-manager restore '#1' --yes
 ```
 
 `delete-project` always removes the saved project root references and trashes every chat whose `cwd` exactly matches that project path.
@@ -98,6 +118,7 @@ This is a local metadata/file manager. It does not manage ChatGPT account login,
 Before publishing:
 
 ```bash
+npm run build
 npm test
 npm run pack:check
 ```
