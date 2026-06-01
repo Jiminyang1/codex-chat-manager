@@ -591,11 +591,6 @@ test("config save, profile switch, and delete profile round-trips", async () => 
   assert.equal(saved.saved, true);
   const profileId = saved.profile.id;
 
-  // Save a second profile with official config.
-  const officialHome = await makeConfigHome('model_provider = "openai"\nmodel = "gpt-5.5"\n');
-  const savedOfficial = JSON.parse((await runCli(["config-save-profile", "official", "--codex-home", officialHome, "--json"])).stdout);
-  const officialProfileId = savedOfficial.profile.id;
-
   // Switch away from relay to official profile (just to verify switching).
   await runCli(["profile-switch", profileId, "--codex-home", home, "--json", "--yes"]);
   const restored = await fs.readFile(path.join(home, "config.toml"), "utf8");

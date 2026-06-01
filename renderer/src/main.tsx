@@ -22,6 +22,7 @@ import { ProviderDetail } from "./components/ProviderDetail";
 import { StatusPanel } from "./components/StatusPanel";
 import { SyncDetail } from "./components/SyncDetail";
 import { ThreadDetail } from "./components/ThreadDetail";
+import logoUrl from "./assets/logo.svg";
 import {
   backupGroupMeta,
   backupProjectLabel,
@@ -36,7 +37,7 @@ import {
 import { clamp, formatDate, projectName, shortPath, storedNumber } from "./lib/format";
 import { defaultProviderAuth, defaultProviderConfig, officialSwitchMessage, profileSummary, providerIdFromLabel } from "./lib/provider-helpers";
 import "./styles.css";
-import type { BackupScope, BackupSummary, ConfigOverview, JsonRecord, ProcessStatus, Project, ProviderProfile, Status, SyncMode, Thread } from "../../src/types";
+import type { BackupSummary, ConfigOverview, JsonRecord, ProcessStatus, Project, ProviderProfile, Status, SyncMode, Thread } from "../../src/types";
 import type { ActionName } from "../../src/actions.cjs";
 
 type ThemePreference = "system" | "light" | "dark";
@@ -692,7 +693,7 @@ function App() {
       <aside className="sidebar">
         <div className="traffic-space" />
         <div className="brand">
-          <span className="mark">◆</span>
+          <img className="brand-logo" src={logoUrl} alt="" draggable={false} />
           <span>Codex Manager</span>
         </div>
         <button className={`nav ${view === "chats" ? "active" : ""}`} onClick={() => selectView("chats")} type="button">

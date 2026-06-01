@@ -7,10 +7,8 @@ import {
   createBackup,
   listBackups,
   openDb,
-  placeholders,
   prepareRolloutProviderUpdate,
   readJsonIfPresent,
-  readThreads,
   restoreMutationBackup,
   timestamp,
   writeFilePreservingTimes

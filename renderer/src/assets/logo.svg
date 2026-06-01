@@ -1,0 +1,16 @@
+<svg width="64" height="64" viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="ccm-logo-fill" x1="13" y1="9" x2="52" y2="57" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#1F8BFF"/>
+      <stop offset="1" stop-color="#0755B8"/>
+    </linearGradient>
+    <linearGradient id="ccm-logo-line" x1="19" y1="23" x2="46" y2="43" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#FFFFFF"/>
+      <stop offset="1" stop-color="#D8ECFF"/>
+    </linearGradient>
+  </defs>
+  <path d="M32 5.5L54 18.2V43.8L32 56.5L10 43.8V18.2L32 5.5Z" fill="url(#ccm-logo-fill)"/>
+  <path d="M32 5.5L54 18.2V43.8L32 56.5L10 43.8V18.2L32 5.5Z" stroke="#0A4EA3" stroke-width="2"/>
+  <path d="M22.5 22.5H41.5C44.5 22.5 47 24.9 47 27.9V35.1C47 38.1 44.5 40.5 41.5 40.5H33.7L27.4 45.3C26.5 46 25.2 45.3 25.2 44.2V40.5H22.5C19.5 40.5 17 38.1 17 35.1V27.9C17 24.9 19.5 22.5 22.5 22.5Z" fill="white" fill-opacity=".18" stroke="url(#ccm-logo-line)" stroke-width="3" stroke-linejoin="round"/>
+  <path d="M24 29H40M24 34H35" stroke="white" stroke-width="3" stroke-linecap="round"/>
+</svg>

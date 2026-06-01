@@ -1,6 +1,5 @@
 import { z } from "zod";
 import type {
-  BackupScope,
   BackupSummary,
   ConfigFileName,
   ConfigOverview,
@@ -152,4 +151,3 @@ export function parseActionPayload<Action extends ActionName>(
   }
   return parsed.data as ActionPayload<Action>;
 }
-
