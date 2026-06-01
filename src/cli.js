@@ -74,7 +74,7 @@ ${color(COLOR.cyan, "Commands")}
   delete-project | rm-project '<path-or-#number>'
   trash-provider | delete-provider <provider-id>
   backups
-  restore <backup-dir-or-#number>
+  restore <backup-dir-or-#number> [--scope chats|config|metadata]
   web [--port 8765]
 
 ${color(COLOR.cyan, "Config / provider switching")}
@@ -453,14 +453,18 @@ function printBackups(backups) {
   printTable([
     { key: "index", label: "#", align: "right", width: 3 },
     { key: "created", label: "Created", width: 16 },
+    { key: "category", label: "Category", width: 10 },
     { key: "threads", label: "Chats", align: "right" },
-    { key: "reason", label: "Reason", width: 34 },
+    { key: "title", label: "Title", width: 24 },
+    { key: "subject", label: "Subject", width: 28 },
     { key: "path", label: "Backup", width: 56 }
   ], backups.map((backup, index) => ({
     index: `#${index + 1}`,
     created: formatIsoDate(backup.createdAt),
+    category: backup.category ?? "-",
     threads: backup.threadIds.length,
-    reason: backup.reason || "backup",
+    title: backup.title || backup.reason || "backup",
+    subject: backup.subject || backup.reason || "backup",
     path: compactPath(backup.path)
   })), { empty: "No chat-manager backups found." });
   if (backups.length) {
@@ -514,19 +518,23 @@ function printRestoreResult(result, execute) {
   if (execute) {
     printKeyValues([
       ["Backup", compactPath(result.backupDir)],
+      ["Scope", result.scope],
       ["Pre-restore backup", compactPath(result.preRestoreBackup)],
-      ["Restored files", result.restoredFiles]
+      ["Restored files", result.restoredFiles],
+      ["Provider aligned", result.alignedProvider?.target ?? "n/a"]
     ]);
     return;
   }
   printKeyValues([
     ["Mode", color(COLOR.yellow, "preview")],
     ["Backup", compactPath(result.backupDir)],
+    ["Scope", result.scope],
     ["Reason", result.metadata?.reason ?? "backup"],
+    ["Category", result.backup?.category ?? "-"],
     ["Chats", result.metadata?.threadIds?.length ?? 0],
     ["Created", formatIsoDate(result.metadata?.createdAt)]
   ]);
-  printNext(`codex-chat-manager restore ${shellQuote(result.backupDir)} --yes`);
+  printNext(`codex-chat-manager restore ${shellQuote(result.backupDir)} --scope ${result.scope} --yes`);
 }
 
 async function main() {
@@ -625,7 +633,7 @@ async function main() {
   if (command === "restore") {
     const backupDir = await resolveBackupRef(home, positionals[1] ?? flags.backup);
     if (!backupDir) throw new Error("restore requires a backup directory");
-    const result = await restoreBackup(home, backupDir, execute);
+    const result = await restoreBackup(home, backupDir, execute, flags.scope);
     asJson ? printJson(result) : printRestoreResult(result, execute);
     return;
   }

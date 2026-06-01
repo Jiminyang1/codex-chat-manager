@@ -97,6 +97,20 @@ async function makeFixture({ outsideRollout = false } = {}) {
   return { home, threadId, project, rolloutPath };
 }
 
+async function readThreadProvider(home, threadId) {
+  const db = new DatabaseSync(path.join(home, "state_5.sqlite"), { readOnly: true });
+  try {
+    return db.prepare("SELECT model_provider FROM threads WHERE id = ?").get(threadId)?.model_provider ?? null;
+  } finally {
+    db.close();
+  }
+}
+
+async function readRolloutProvider(filePath) {
+  const firstLine = (await fs.readFile(filePath, "utf8")).split("\n")[0];
+  return JSON.parse(firstLine).payload.model_provider;
+}
+
 test("trash-thread moves rollout, removes indexes, and restore recovers them", async () => {
   const fixture = await makeFixture();
   const trash = await runCli(["trash-thread", fixture.threadId, "--codex-home", fixture.home, "--yes", "--json"]);
@@ -189,15 +203,195 @@ test("backups command lists backups and restore supports backup numbers", async 
   const backups = await runCli(["backups", "--codex-home", fixture.home, "--json"]);
   const backupRows = JSON.parse(backups.stdout);
   assert.equal(backupRows[0].path, deleteResult.backupDir);
+  assert.equal(backupRows[0].category, "chats");
+  assert.equal(backupRows[0].kind, "project");
+  assert.equal(backupRows[0].projectRoot, fixture.project);
+  assert.deepEqual(backupRows[0].scopes, ["chats"]);
+  assert.equal(backupRows[0].chatSummaries[0].title, "Fixture");
 
   const restorePreview = await runCli(["restore", "#1", "--codex-home", fixture.home, "--json"]);
   const restoreResult = JSON.parse(restorePreview.stdout);
   assert.equal(restoreResult.dryRun, true);
   assert.equal(restoreResult.backupDir, deleteResult.backupDir);
+  assert.equal(restoreResult.scope, "chats");
 
-  await fs.writeFile(path.join(fixture.home, "state_5.sqlite-wal"), "stale wal");
-  await runCli(["restore", "#1", "--codex-home", fixture.home, "--json", "--yes"]);
-  assert.equal(await exists(path.join(fixture.home, "state_5.sqlite-wal")), false);
+  const restored = JSON.parse((await runCli(["restore", "#1", "--codex-home", fixture.home, "--json", "--yes"])).stdout);
+  assert.equal(restored.scope, "chats");
+  assert.equal(restored.restoredDb, false);
+  assert.equal(await exists(fixture.rolloutPath), true);
+});
+
+test("backup summaries keep unsaved Codex cwd chats projectless", async () => {
+  const fixture = await makeFixture();
+  const generatedCwd = path.join(fixture.home, "Documents", "Codex", "2026-05-20", "2-kla");
+  await fs.mkdir(generatedCwd, { recursive: true });
+  const db = new DatabaseSync(path.join(fixture.home, "state_5.sqlite"));
+  db.prepare("UPDATE threads SET cwd = ?, title = 'Generated Chat' WHERE id = ?").run(generatedCwd, fixture.threadId);
+  db.close();
+
+  const statePath = path.join(fixture.home, ".codex-global-state.json");
+  const state = JSON.parse(await fs.readFile(statePath, "utf8"));
+  state["project-order"] = [];
+  state["electron-saved-workspace-roots"] = [];
+  state["active-workspace-roots"] = [];
+  state["projectless-thread-ids"] = [fixture.threadId];
+  state["thread-workspace-root-hints"] = {};
+  await fs.writeFile(statePath, JSON.stringify(state, null, 2));
+
+  const deleted = JSON.parse((await runCli(["delete-project", generatedCwd, "--codex-home", fixture.home, "--yes", "--json"])).stdout);
+  assert.equal(deleted.removedProjectRefs, 0);
+  const backupRows = JSON.parse((await runCli(["backups", "--codex-home", fixture.home, "--json"])).stdout);
+  const backup = backupRows.find((row) => row.path === deleted.backupDir);
+  assert.equal(backup.kind, "project");
+  assert.equal(backup.projectRoot, "");
+  assert.equal(backup.chatSummaries[0].projectless, true);
+  assert.equal(backup.chatSummaries[0].savedProjectRoot, "");
+
+  await invokeAction("backup:restore", {
+    codexHome: fixture.home,
+    backupDir: deleted.backupDir,
+    scope: "chats",
+    confirmed: true
+  });
+  const restoredState = JSON.parse(await fs.readFile(statePath, "utf8"));
+  assert.deepEqual(restoredState["project-order"], []);
+  assert.deepEqual(restoredState["electron-saved-workspace-roots"], []);
+  assert.deepEqual(restoredState["active-workspace-roots"], []);
+  assert.deepEqual(restoredState["projectless-thread-ids"], [fixture.threadId]);
+});
+
+test("backup restore config scope restores config/auth without restoring chat DB", async () => {
+  const fixture = await makeFixture();
+  const originalConfig = await fs.readFile(path.join(fixture.home, "config.toml"), "utf8");
+  const originalAuth = JSON.stringify({ auth_mode: "chatgpt" });
+  await fs.writeFile(path.join(fixture.home, "auth.json"), originalAuth);
+  const backupDir = (await invokeAction("config:file:write", {
+    codexHome: fixture.home,
+    file: "config",
+    content: 'model_provider = "axis"\nmodel = "gpt-5.5"\n',
+    confirmed: true
+  })).backupDir;
+
+  await fs.writeFile(path.join(fixture.home, "config.toml"), 'model_provider = "changed"\n');
+  await fs.writeFile(path.join(fixture.home, "auth.json"), JSON.stringify({ OPENAI_API_KEY: "sk-changed" }));
+  const db = new DatabaseSync(path.join(fixture.home, "state_5.sqlite"));
+  db.prepare("DELETE FROM threads WHERE id = ?").run(fixture.threadId);
+  db.close();
+
+  const result = await invokeAction("backup:restore", {
+    codexHome: fixture.home,
+    backupDir,
+    scope: "config",
+    confirmed: true
+  });
+
+  assert.equal(result.scope, "config");
+  assert.equal(result.restoredDb, false);
+  assert.equal(result.restoredConfigFiles, 2);
+  assert.equal(await fs.readFile(path.join(fixture.home, "config.toml"), "utf8"), originalConfig);
+  assert.equal(await fs.readFile(path.join(fixture.home, "auth.json"), "utf8"), originalAuth);
+  assert.equal(await readThreadProvider(fixture.home, fixture.threadId), null);
+});
+
+test("backup restore chats scope restores deleted chat after provider sync and keeps current provider", async () => {
+  const fixture = await makeFixture();
+  const trash = await invokeAction("thread:trash", {
+    codexHome: fixture.home,
+    threadId: fixture.threadId,
+    confirmed: true
+  });
+  assert.equal(await exists(fixture.rolloutPath), false);
+
+  await fs.writeFile(path.join(fixture.home, "config.toml"), 'model_provider = "axis"\nmodel = "gpt-5.5"\n');
+  const sync = JSON.parse((await runCli(["config-sync", "--codex-home", fixture.home, "--json", "--yes"])).stdout);
+  assert.equal(sync.noOp, true);
+
+  const stateAfterTrash = JSON.parse(await fs.readFile(path.join(fixture.home, ".codex-global-state.json"), "utf8"));
+  assert.equal(stateAfterTrash["thread-workspace-root-hints"][fixture.threadId], undefined);
+
+  const result = await invokeAction("backup:restore", {
+    codexHome: fixture.home,
+    backupDir: trash.backupDir,
+    scope: "chats",
+    confirmed: true
+  });
+
+  assert.equal(result.scope, "chats");
+  assert.equal(result.restoredDb, false);
+  assert.equal(result.alignedProvider.target, "axis");
+  assert.equal(result.backup.chatSummaries[0].title, "Fixture");
+  assert.equal(await exists(fixture.rolloutPath), true);
+  assert.equal(await readThreadProvider(fixture.home, fixture.threadId), "axis");
+  assert.equal(await readRolloutProvider(fixture.rolloutPath), "axis");
+  const restoredState = JSON.parse(await fs.readFile(path.join(fixture.home, ".codex-global-state.json"), "utf8"));
+  assert.deepEqual(restoredState["projectless-thread-ids"], [fixture.threadId]);
+  assert.equal(restoredState["thread-workspace-root-hints"][fixture.threadId], fixture.project);
+});
+
+test("backup restore chats scope restores deleted project roots and chat summaries", async () => {
+  const fixture = await makeFixture();
+  const deleted = JSON.parse((await runCli(["delete-project", fixture.project, "--codex-home", fixture.home, "--yes", "--json"])).stdout);
+  await fs.writeFile(path.join(fixture.home, "config.toml"), 'model_provider = "axis"\nmodel = "gpt-5.5"\n');
+
+  const result = await invokeAction("backup:restore", {
+    codexHome: fixture.home,
+    backupDir: deleted.backupDir,
+    scope: "chats",
+    confirmed: true
+  });
+
+  assert.equal(result.scope, "chats");
+  assert.equal(result.backup.kind, "project");
+  assert.equal(result.backup.projectRoot, fixture.project);
+  assert.equal(result.backup.chatSummaries[0].title, "Fixture");
+  assert.equal(result.restoredThreadRefs.projects, 3);
+  const state = JSON.parse(await fs.readFile(path.join(fixture.home, ".codex-global-state.json"), "utf8"));
+  assert.deepEqual(state["project-order"], [fixture.project]);
+  assert.deepEqual(state["electron-saved-workspace-roots"], [fixture.project]);
+  assert.deepEqual(state["active-workspace-roots"], [fixture.project]);
+  assert.equal(await readThreadProvider(fixture.home, fixture.threadId), "axis");
+});
+
+test("backup restore metadata scope rolls provider tags back without changing config", async () => {
+  const fixture = await makeFixture();
+  await fs.writeFile(path.join(fixture.home, "config.toml"), 'model_provider = "axis"\nmodel = "gpt-5.5"\n');
+  const sync = JSON.parse((await runCli(["config-sync", "--codex-home", fixture.home, "--json", "--yes"])).stdout);
+  assert.equal(sync.target, "axis");
+  assert.equal(await readThreadProvider(fixture.home, fixture.threadId), "axis");
+  assert.equal(await readRolloutProvider(fixture.rolloutPath), "axis");
+
+  const result = await invokeAction("backup:restore", {
+    codexHome: fixture.home,
+    backupDir: sync.backupDir,
+    scope: "metadata",
+    confirmed: true
+  });
+
+  assert.equal(result.scope, "metadata");
+  assert.equal(result.restoredDb, false);
+  assert.equal(result.restoredMetadata.restoredRows, 1);
+  assert.equal(await fs.readFile(path.join(fixture.home, "config.toml"), "utf8"), 'model_provider = "axis"\nmodel = "gpt-5.5"\n');
+  assert.equal(await readThreadProvider(fixture.home, fixture.threadId), "openai");
+  assert.equal(await readRolloutProvider(fixture.rolloutPath), "openai");
+});
+
+test("backup list classifies provider and sync backups separately", async () => {
+  const fixture = await makeFixture();
+  await invokeAction("config:file:write", {
+    codexHome: fixture.home,
+    file: "config",
+    content: 'model_provider = "axis"\nmodel = "gpt-5.5"\n',
+    confirmed: true
+  });
+  await runCli(["config-sync", "--codex-home", fixture.home, "--json", "--yes"]);
+
+  const backups = await invokeAction("backups:list", { codexHome: fixture.home });
+  const providerBackup = backups.find((backup) => backup.kind === "config-file");
+  const syncBackup = backups.find((backup) => backup.kind === "retag");
+  assert.equal(providerBackup.category, "providers");
+  assert.deepEqual(providerBackup.scopes, ["config"]);
+  assert.equal(syncBackup.category, "sync");
+  assert.deepEqual(syncBackup.scopes, ["metadata"]);
 });
 
 test("mutation refuses rollout paths outside selected codex home", async () => {

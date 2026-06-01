@@ -7,12 +7,15 @@ import {
   Folder,
   Info,
   KeyRound,
+  Monitor,
+  Moon,
   Plus,
   RefreshCw,
   Save,
   Search,
   Settings,
   Shield,
+  Sun,
   Trash2
 } from "lucide-react";
 import { getCodexHome, invoke, setCodexHome } from "./api.js";
@@ -89,6 +92,194 @@ const MUTATIONS_REQUIRING_CODEX_CLOSED = new Set([
   "provider:useOfficial"
 ]);
 
+const BACKUP_CATEGORIES = [
+  { id: "chats", title: "Chats / Projects", label: "Chats", icon: Folder },
+  { id: "providers", title: "Config History", label: "Config", icon: KeyRound },
+  { id: "sync", title: "Sync / Metadata", label: "Sync", icon: Shield }
+];
+
+const THEME_STORAGE_KEY = "appearance.theme";
+const THEME_OPTIONS = [
+  { id: "system", label: "System", icon: Monitor },
+  { id: "light", label: "Light", icon: Sun },
+  { id: "dark", label: "Dark", icon: Moon }
+];
+
+function storedThemePreference() {
+  const value = window.localStorage.getItem(THEME_STORAGE_KEY);
+  return THEME_OPTIONS.some((option) => option.id === value) ? value : "system";
+}
+
+function resolvedTheme(preference) {
+  if (preference === "light" || preference === "dark") return preference;
+  return window.matchMedia?.("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+}
+
+function applyTheme(preference) {
+  document.documentElement.dataset.theme = resolvedTheme(preference);
+  document.documentElement.dataset.themePreference = preference;
+}
+
+applyTheme(storedThemePreference());
+
+function backupCategoryTitle(id) {
+  return BACKUP_CATEGORIES.find((category) => category.id === id)?.title ?? "Backups";
+}
+
+function formatBackupDate(value) {
+  if (!value) return "-";
+  return new Intl.DateTimeFormat(undefined, {
+    month: "short",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit"
+  }).format(new Date(value));
+}
+
+function backupFilesSummary(files) {
+  const names = [];
+  if (files?.db) names.push("SQLite");
+  if (files?.config) names.push("config.toml");
+  if (files?.auth) names.push("auth.json");
+  if (files?.globalState) names.push("global state");
+  if (files?.trashManifest) names.push("trash");
+  return names;
+}
+
+function backupScopeLabel(scope) {
+  if (scope === "chats") return "Restore chats";
+  if (scope === "config") return "Restore config/auth";
+  if (scope === "metadata") return "Restore metadata";
+  return "Restore";
+}
+
+function backupRestoreMessage(backup, scope, activeProvider) {
+  const created = formatBackupDate(backup?.createdAt);
+  const count = backup?.threadIds?.length ?? 0;
+  if (scope === "chats") {
+    return [
+      `${backup?.title || "Backup"} · ${created}`,
+      "",
+      `Restore ${count} chat(s), rollout files, and chat sidebar references from this backup.`,
+      "",
+      `Restored chats will be aligned to the current active provider: ${activeProvider || "-"}. This keeps a later provider sync/retag in place.`
+    ].join("\n");
+  }
+  if (scope === "config") {
+    return [
+      `${backup?.title || "Backup"} · ${created}`,
+      "",
+      "Restore config.toml and auth.json from this backup.",
+      "",
+      "SQLite chats, project state, and provider metadata are left unchanged."
+    ].join("\n");
+  }
+  if (scope === "metadata") {
+    return [
+      `${backup?.title || "Backup"} · ${created}`,
+      "",
+      `Restore provider metadata for ${count} chat(s) from this backup.`,
+      "",
+      "This can undo a later provider sync/retag. config.toml and auth.json are left unchanged."
+    ].join("\n");
+  }
+  return `${backup?.title || "Backup"} · ${created}`;
+}
+
+function backupTitle(backup) {
+  if (backup?.category === "chats") {
+    const chats = backup.chatSummaries ?? [];
+    if (backup.kind === "chat" && chats[0]) return chats[0].title || "(untitled)";
+    if (backup.kind === "project" && backup.projectRoot) return projectName(backup.projectRoot);
+    if (backup.kind === "project" && chats[0]) return chats[0].title || `${chats.length || backup.threadIds?.length || 0} chat(s)`;
+    return `${chats.length || backup.threadIds?.length || 0} chat(s)`;
+  }
+  return backup?.title || backup?.reason || "Backup";
+}
+
+function backupKindLabel(backup) {
+  if (!backup) return "backup";
+  if (backup.category === "chats") {
+    if (backup.kind === "project") return backup.projectRoot ? "project" : ((backup.threadIds?.length ?? 0) > 1 ? "chats" : "chat");
+    if (backup.kind === "chat") return "chat";
+    return "chats";
+  }
+  if (backup.category === "providers") return "config";
+  if (backup.category === "sync") return "metadata";
+  return backup.kind || backup.category || "backup";
+}
+
+function backupProjectPath(backup) {
+  if (backup?.category !== "chats") return "";
+  if (backup.projectRoot) return backup.projectRoot;
+  const first = backup.chatSummaries?.[0];
+  if (first?.projectless) return "";
+  return first?.savedProjectRoot || "";
+}
+
+function backupProjectLabel(projectPath) {
+  return projectPath ? projectName(projectPath) : "Projectless chats";
+}
+
+function backupGroupMeta(group) {
+  const project = group.projectPath ? shortPath(group.projectPath) : "No saved project path";
+  const snapshotCount = group.backups.length;
+  const chatCount = group.chatCount;
+  return `${project} · ${snapshotCount} backup${snapshotCount === 1 ? "" : "s"} · ${chatCount} chat${chatCount === 1 ? "" : "s"}`;
+}
+
+function backupSubjectLabel(backup) {
+  if (!backup) return "-";
+  const chats = backup.chatSummaries ?? [];
+  const first = chats[0];
+  if (backup.category === "chats") {
+    if (backup.projectRoot) return shortPath(backup.projectRoot);
+    if (backup.kind === "project") return "Projectless chats";
+    if (backup.kind === "chat" && first) return first.title || first.id;
+    return backup.subject || first?.title || first?.id || "-";
+  }
+  return backup.subject || backup.reason || "-";
+}
+
+function backupRowTitle(backup) {
+  if (backup?.category === "chats" && backup.kind === "project" && backup.projectRoot) return "Project snapshot";
+  return backupTitle(backup);
+}
+
+function backupRowSubtitle(backup) {
+  if (backup?.category === "chats") {
+    const chats = backup.chatSummaries ?? [];
+    const first = chats[0];
+    const count = chats.length || backup.threadIds?.length || 0;
+    if (first) {
+      const more = count > 1 ? ` + ${count - 1} more` : "";
+      return `${first.model_provider || "-"} · ${formatDate(first.updated_at)}${more}`;
+    }
+    return `${count} chat(s) · ${formatBackupDate(backup.createdAt)}`;
+  }
+  return backupSubtitle(backup);
+}
+
+function backupChatLocation(thread, backup) {
+  if (backup?.projectRoot) return projectName(backup.projectRoot);
+  if (thread?.projectless || !thread?.savedProjectRoot) return "Projectless";
+  return projectName(thread.savedProjectRoot);
+}
+
+function backupSubtitle(backup) {
+  if (backup?.category === "chats") {
+    const chats = backup.chatSummaries ?? [];
+    const first = chats[0];
+    const count = chats.length || backup.threadIds?.length || 0;
+    if (first) {
+      const more = count > 1 ? ` + ${count - 1} more` : "";
+      return `${projectName(first.cwd)} · ${first.model_provider || "-"} · ${formatDate(first.updated_at)}${more}`;
+    }
+    return `${count} chat(s) · ${formatBackupDate(backup.createdAt)}`;
+  }
+  return `${backup?.subject || backup?.reason || "snapshot"} · ${backup?.threadIds?.length ?? 0} chats · ${formatBackupDate(backup?.createdAt)}`;
+}
+
 function App() {
   const [codexHome, setHome] = useState(getCodexHome());
   const [status, setStatus] = useState(null);
@@ -101,6 +292,8 @@ function App() {
   const [selectedProjectlessThreadId, setSelectedProjectlessThreadId] = useState("");
   const [selectedProvider, setSelectedProvider] = useState("");
   const [selectedThreadId, setSelectedThreadId] = useState("");
+  const [backupCategory, setBackupCategory] = useState("chats");
+  const [selectedBackupPath, setSelectedBackupPath] = useState("");
   const [view, setView] = useState("chats");
   const [search, setSearch] = useState("");
   const [archived, setArchived] = useState(false);
@@ -118,8 +311,10 @@ function App() {
     authText: "",
     switch: true
   });
+  const [expandedBackupGroups, setExpandedBackupGroups] = useState(() => new Set());
   const [sidebarWidth, setSidebarWidth] = useState(() => storedNumber("layout.sidebarWidth", 236));
   const [detailWidth, setDetailWidth] = useState(() => storedNumber("layout.detailWidth", 360));
+  const [themePreference, setThemePreference] = useState(storedThemePreference);
 
   const providers = useMemo(() => {
     const counts = new Map();
@@ -181,12 +376,66 @@ function App() {
   ], [activeProvider, config, profileSummaries]);
   const profilesKey = (config?.profiles ?? []).map((profile) => `${profile.id}:${profile.updatedAt ?? profile.createdAt ?? ""}:${profile.active ? "1" : "0"}`).join("|");
   const selectedProviderItem = providerItems.find((item) => item.id === selectedProviderCard) ?? providerItems[0] ?? null;
+  const backupCounts = useMemo(() => {
+    const counts = { chats: 0, providers: 0, sync: 0 };
+    for (const backup of backups) {
+      const category = backup.category && counts[backup.category] !== undefined ? backup.category : "providers";
+      counts[category] += 1;
+    }
+    return counts;
+  }, [backups]);
+  const filteredBackups = useMemo(() => (
+    backups.filter((backup) => (backup.category ?? "providers") === backupCategory)
+  ), [backups, backupCategory]);
+  const groupedChatBackups = useMemo(() => {
+    const groups = [];
+    const byProject = new Map();
+    for (const backup of filteredBackups) {
+      const projectPath = backupProjectPath(backup);
+      const key = projectPath || "__projectless__";
+      let group = byProject.get(key);
+      if (!group) {
+        group = {
+          key,
+          projectPath,
+          title: backupProjectLabel(projectPath),
+          backups: [],
+          chatCount: 0
+        };
+        byProject.set(key, group);
+        groups.push(group);
+      }
+      group.backups.push(backup);
+      group.chatCount += backup.chatSummaries?.length || backup.threadIds?.length || 0;
+    }
+    return groups;
+  }, [filteredBackups]);
+  const selectedBackup = filteredBackups.find((backup) => backup.path === selectedBackupPath) ?? filteredBackups[0] ?? null;
 
   function notify(message) {
     setToast(message);
     window.clearTimeout(notify.timer);
     notify.timer = window.setTimeout(() => setToast(""), 3200);
   }
+
+  function toggleBackupGroup(key) {
+    setExpandedBackupGroups((current) => {
+      const next = new Set(current);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  }
+
+  useEffect(() => {
+    window.localStorage.setItem(THEME_STORAGE_KEY, themePreference);
+    applyTheme(themePreference);
+    const media = window.matchMedia?.("(prefers-color-scheme: dark)");
+    if (!media || themePreference !== "system") return undefined;
+    const syncSystemTheme = () => applyTheme("system");
+    media.addEventListener?.("change", syncSystemTheme);
+    return () => media.removeEventListener?.("change", syncSystemTheme);
+  }, [themePreference]);
 
   async function loadAll() {
     setBusy(true);
@@ -287,6 +536,23 @@ function App() {
       setSelectedProviderCard(providerItems.find((item) => item.active)?.id ?? providerItems[0].id);
     }
   }, [providerItems, selectedProviderCard]);
+
+  useEffect(() => {
+    if (view === "backups" && selectedBackup?.path && selectedBackup.path !== selectedBackupPath) {
+      setSelectedBackupPath(selectedBackup.path);
+    }
+  }, [selectedBackup, selectedBackupPath, view]);
+
+  useEffect(() => {
+    if (backupCategory !== "chats" || !selectedBackup) return;
+    const selectedGroupKey = backupProjectPath(selectedBackup) || "__projectless__";
+    setExpandedBackupGroups((current) => {
+      if (current.has(selectedGroupKey)) return current;
+      const next = new Set(current);
+      next.add(selectedGroupKey);
+      return next;
+    });
+  }, [backupCategory, selectedBackup]);
 
   useEffect(() => {
     let cancelled = false;
@@ -556,6 +822,20 @@ function App() {
           </div>
         )}
 
+        {view === "backups" && (
+          <div className="side-section">
+            <div className="side-title">Backup domains</div>
+            {BACKUP_CATEGORIES.map((category) => {
+              const Icon = category.icon;
+              return (
+                <button className={`side-item side-item-icon ${backupCategory === category.id ? "selected" : ""}`} key={category.id} onClick={() => { setBackupCategory(category.id); setSelectedBackupPath(""); }} type="button">
+                  <span><Icon size={14} /> {category.label}</span><strong>{backupCounts[category.id] ?? 0}</strong>
+                </button>
+              );
+            })}
+          </div>
+        )}
+
       </aside>
       <button className="resize-handle resize-sidebar" aria-label="Resize sidebar" onMouseDown={(event) => startResize("sidebar", event)} type="button" />
 
@@ -614,15 +894,49 @@ function App() {
 
             {view === "backups" && (
               <>
-                <div className="pane-head"><div><h1>Backups</h1><p>{backups.length} restorable snapshots</p></div></div>
+                <div className="pane-head">
+                  <div>
+                    <h1>{backupCategoryTitle(backupCategory)}</h1>
+                    <p>{filteredBackups.length} of {backups.length} restorable snapshots</p>
+                  </div>
+                </div>
                 <div className="rows">
-                  {backups.map((backup) => (
-                    <button className="row" key={backup.path} onClick={() => setModal({ title: "Restore backup", body: `${backup.reason || "backup"}\n${new Date(backup.createdAt).toLocaleString()}`, confirmLabel: "Restore", tone: "danger", action: () => runMutation("backup:restore", { backupDir: backup.path }, "Backup restored") })} type="button">
-                      <div className="row-main"><strong>{backup.reason || "backup"}</strong><span>{backup.threadIds.length} chats · {shortPath(backup.path)}</span></div>
-                      <ArchiveRestore size={15} />
-                    </button>
-                  ))}
-                  {!backups.length && <div className="empty">No backups yet.</div>}
+                  {backupCategory === "chats"
+                    ? groupedChatBackups.map((group) => (
+                      <div className="backup-group" key={group.key}>
+                        <button aria-expanded={expandedBackupGroups.has(group.key)} className="backup-group-head" onClick={() => toggleBackupGroup(group.key)} type="button">
+                          <ChevronRight className={`backup-group-chevron ${expandedBackupGroups.has(group.key) ? "expanded" : ""}`} size={14} />
+                          <div>
+                            <strong>{group.title}</strong>
+                            <span>{backupGroupMeta(group)}</span>
+                          </div>
+                          <em title={`${group.backups.length} backup snapshot${group.backups.length === 1 ? "" : "s"}`}>{group.backups.length}</em>
+                        </button>
+                        {expandedBackupGroups.has(group.key) && group.backups.map((backup) => (
+                          <button className={`row backup-row-nested ${selectedBackup?.path === backup.path ? "selected" : ""}`} key={backup.path} onClick={() => setSelectedBackupPath(backup.path)} type="button">
+                            <div className="row-main">
+                              <strong>{backupRowTitle(backup)}</strong>
+                              <span>{backupRowSubtitle(backup)}</span>
+                            </div>
+                            <div className="row-tail">
+                              <ChevronRight size={15} />
+                            </div>
+                          </button>
+                        ))}
+                      </div>
+                    ))
+                    : filteredBackups.map((backup) => (
+                      <button className={`row ${selectedBackup?.path === backup.path ? "selected" : ""}`} key={backup.path} onClick={() => setSelectedBackupPath(backup.path)} type="button">
+                        <div className="row-main">
+                          <strong>{backupTitle(backup)}</strong>
+                          <span>{backupSubtitle(backup)}</span>
+                        </div>
+                        <div className="row-tail">
+                          <ChevronRight size={15} />
+                        </div>
+                      </button>
+                    ))}
+                  {!filteredBackups.length && <div className="empty">No {backupCategoryTitle(backupCategory).toLowerCase()} backups yet.</div>}
                 </div>
               </>
             )}
@@ -630,8 +944,25 @@ function App() {
             {view === "settings" && (
               <div className="settings-pane">
                 <h1>Settings</h1>
-                <label className="field"><span>Codex home</span><input value={codexHome} onChange={(event) => setHome(event.target.value)} /></label>
-                <button className="primary" onClick={loadAll} type="button"><Save size={15} /> Save and reload</button>
+                <section className="settings-section">
+                  <h2>Appearance</h2>
+                  <div className="segmented theme-control" role="group" aria-label="Appearance">
+                    {THEME_OPTIONS.map((option) => {
+                      const Icon = option.icon;
+                      return (
+                        <button className={themePreference === option.id ? "active" : ""} key={option.id} onClick={() => setThemePreference(option.id)} type="button">
+                          <Icon size={14} />
+                          <span>{option.label}</span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </section>
+                <section className="settings-section">
+                  <h2>Data</h2>
+                  <label className="field"><span>Codex home</span><input value={codexHome} onChange={(event) => setHome(event.target.value)} /></label>
+                  <button className="primary" onClick={loadAll} type="button"><Save size={15} /> Save and reload</button>
+                </section>
               </div>
             )}
           </div>
@@ -644,7 +975,19 @@ function App() {
             {view === "providers" && (
               <ProviderDetail item={selectedProviderItem} config={config} repairCount={repairCount} retagCount={retagCount} files={providerFiles} expandedFiles={expandedFiles} setExpandedFiles={setExpandedFiles} onUseOfficial={() => setModal({ title: "Switch to OpenAI Official", body: officialSwitchMessage(config?.officialAuthSnapshot), confirmLabel: "Switch", tone: "primary", action: () => runMutation("provider:useOfficial", {}, "Switched to OpenAI Official") })} onUseProfile={(profile) => setModal({ title: `Switch to ${profile.label}`, body: profile.hasAuth ? "This writes config.toml and auth.json from the profile snapshot." : "This writes config.toml. auth.json is unchanged.", confirmLabel: "Switch", tone: "primary", action: () => runMutation("profile:switch", { profileId: profile.id }, "Profile switched") })} onEdit={openProfileEditor} onDelete={(profile) => setModal({ title: "Delete profile", body: `Delete saved profile \"${profile.label}\"?`, confirmLabel: "Delete", tone: "danger", action: () => runMutation("profile:delete", { id: profile.id }, "Profile deleted") })} onExplainSync={() => setModal({ title: "Sync modes", body: ["Repair mismatches updates only chats where SQLite and rollout metadata disagree. It keeps each chat on its original provider tag.", "", "Retag all changes every chat outside the active provider to the current provider id. This makes hidden chats visible here, but overwrites previous provider tags.", "", "Both modes create a restorable backup first."].join("\n"), confirmLabel: "Close", tone: "primary", hideCancel: true, action: () => setModal(null) })} onRepair={() => setModal({ title: "Repair provider mismatches", body: `Repair ${repairCount} chat(s). This does not merge provider tags.`, confirmLabel: "Repair", tone: "primary", action: () => runMutation("config:sync", { mode: "repair" }, "Provider mismatches repaired") })} onRetag={() => setModal({ title: "Retag all chats", body: `Retag ${retagCount} chat(s) to ${activeProvider}. Previous provider tags will be overwritten.`, confirmLabel: "Retag", tone: "danger", action: () => runMutation("config:sync", { mode: "retag" }, "Chats retagged") })} />
             )}
-            {view === "backups" && <div className="detail-empty"><ArchiveRestore size={28} /><p>Select a backup to restore it.</p></div>}
+            {view === "backups" && (
+              <BackupDetail
+                backup={selectedBackup}
+                activeProvider={activeProvider}
+                onRestore={(scope) => selectedBackup && setModal({
+                  title: backupScopeLabel(scope),
+                  body: backupRestoreMessage(selectedBackup, scope, activeProvider),
+                  confirmLabel: "Restore",
+                  tone: scope === "metadata" ? "danger" : "primary",
+                  action: () => runMutation("backup:restore", { backupDir: selectedBackup.path, scope }, "Backup restored")
+                })}
+              />
+            )}
             {view === "settings" && <StatusPanel status={status} />}
           </aside>
         </section>
@@ -654,6 +997,92 @@ function App() {
       {modal && modal.kind !== "new-provider" && <ConfirmModal modal={modal} onCancel={() => setModal(null)} />}
       {editor && <ProfileEditor editor={editor} setEditor={setEditor} onCancel={() => setEditor(null)} onSave={saveEditor} />}
       {toast && <div className="toast">{toast}</div>}
+    </div>
+  );
+}
+
+function BackupDetail({ backup, activeProvider, onRestore }) {
+  if (!backup) {
+    return <div className="detail-empty"><ArchiveRestore size={28} /><p>Select a backup.</p></div>;
+  }
+  const fileNames = backupFilesSummary(backup.files);
+  const primaryScope = backup.category === "chats"
+    ? "chats"
+    : backup.category === "sync"
+      ? "metadata"
+      : "config";
+  const scopes = new Set(backup.scopes ?? [primaryScope]);
+  const chats = backup.chatSummaries ?? [];
+  const firstChat = chats[0] ?? null;
+  return (
+    <div className="detail backup-detail">
+      <div className="detail-title">
+        <h2>{backupTitle(backup)}</h2>
+        <span className="badge">{backupKindLabel(backup)}</span>
+      </div>
+      <div className="kv">
+        <span>Created</span><strong>{formatBackupDate(backup.createdAt)}</strong>
+        <span>Kind</span><strong>{backupKindLabel(backup)}</strong>
+        <span>Subject</span><strong>{backupSubjectLabel(backup)}</strong>
+        <span>Chats</span><strong>{backup.threadIds?.length ?? 0}</strong>
+        {backup.category === "chats" && firstChat && (
+          <>
+            <span>{backup.projectRoot ? "Sample chat" : "Location"}</span><strong>{backup.projectRoot ? firstChat.title || firstChat.id : backupChatLocation(firstChat, backup)}</strong>
+            <span>Provider then</span><strong>{firstChat.model_provider || "-"}</strong>
+            <span>Updated</span><strong>{formatDate(firstChat.updated_at)}</strong>
+          </>
+        )}
+        {backup.category !== "chats" && (
+          <>
+            <span>Files</span><strong>{fileNames.length ? fileNames.join(", ") : "-"}</strong>
+            <span>Path</span><strong>{shortPath(backup.path)}</strong>
+          </>
+        )}
+      </div>
+
+      <div className="backup-note">
+        {backup.category === "chats" && `Chat restore brings deleted chats back and aligns them to the current active provider (${activeProvider || "-"}), so later provider sync state is preserved.`}
+        {backup.category === "providers" && "Config restore writes only config.toml and auth.json. Chats, project state, and provider tags stay as they are."}
+        {backup.category === "sync" && "Metadata restore rolls selected chat provider tags back to this snapshot. Use it when a sync/retag operation should be undone."}
+      </div>
+
+      {backup.category === "chats" && (
+        <div className="backup-chat-list">
+          <div className="sync-title">Chats in this backup</div>
+          {chats.map((thread) => (
+            <div className="backup-chat-row" key={thread.id}>
+              <strong>{thread.title || "(untitled)"}</strong>
+              <span>{backupChatLocation(thread, backup)} · {thread.model_provider || "-"} · {formatDate(thread.updated_at)}</span>
+              <p>{thread.preview || thread.first_user_message || thread.id}</p>
+            </div>
+          ))}
+          {!chats.length && <div className="file-empty">No chat summary in this backup.</div>}
+        </div>
+      )}
+
+      <div className="backup-actions">
+        {scopes.has(primaryScope) && (
+          <button className="primary wide" onClick={() => onRestore(primaryScope)} type="button">
+            <ArchiveRestore size={15} /> {backupScopeLabel(primaryScope)}
+          </button>
+        )}
+      </div>
+
+      {backup.category !== "chats" && (
+        <section className="file-disclosure">
+          <div className="file-toggle static">
+            <ArchiveRestore size={14} />
+            <span>metadata</span>
+            <strong>{backup.reason || backup.name}</strong>
+          </div>
+          <pre className="file-preview compact-preview">{JSON.stringify({
+            reason: backup.reason,
+            scopes: backup.scopes,
+            files: backup.files,
+            threadIds: backup.threadIds
+          }, null, 2)}</pre>
+        </section>
+      )}
     </div>
   );
 }

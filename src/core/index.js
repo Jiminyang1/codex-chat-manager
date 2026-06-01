@@ -109,6 +109,45 @@ function getColumns(db, table) {
   return new Set(db.prepare(`PRAGMA table_info("${table.replaceAll("\"", "\"\"")}")`).all().map((row) => row.name));
 }
 
+function tableExists(db, table) {
+  return Boolean(db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?").get(table));
+}
+
+function quoteIdent(value) {
+  return `"${String(value).replaceAll("\"", "\"\"")}"`;
+}
+
+function sqlString(value) {
+  return `'${String(value).replaceAll("'", "''")}'`;
+}
+
+function placeholders(values) {
+  return values.map(() => "?").join(", ");
+}
+
+function attachedTableColumns(db, alias, table) {
+  return new Set(db.prepare(`PRAGMA ${quoteIdent(alias)}.table_info(${quoteIdent(table)})`).all().map((row) => row.name));
+}
+
+function uniqueStrings(values) {
+  return [...new Set((values ?? []).filter((value) => typeof value === "string" && value))];
+}
+
+function compactThreadSummary(thread) {
+  return {
+    id: thread.id,
+    title: thread.title ?? "",
+    cwd: thread.cwd ?? "",
+    model_provider: thread.model_provider ?? "",
+    updated_at: thread.updated_at ?? null,
+    created_at: thread.created_at ?? null,
+    preview: thread.preview ?? thread.first_user_message ?? "",
+    first_user_message: thread.first_user_message ?? "",
+    rollout_path: thread.rollout_path ?? "",
+    archived: Number(thread.archived ?? 0)
+  };
+}
+
 function buildThreadQuery(flags) {
   const where = [];
   const params = {};
@@ -214,6 +253,12 @@ function savedProjectRoots(globalState) {
     seen.add(normalized);
     return true;
   });
+}
+
+function findSavedProjectRoot(value, roots) {
+  const target = normalizePathForCompare(value);
+  if (!target) return "";
+  return roots.find((root) => normalizePathForCompare(root) === target) ?? "";
 }
 
 async function getProjects(home) {
@@ -550,6 +595,7 @@ async function createBackup(home, reason, targetThreads = []) {
     reason,
     codexHome: home,
     threadIds: targetThreads.map((thread) => thread.id),
+    chatSummaries: targetThreads.map(compactThreadSummary),
     copiedRollouts
   };
   await fs.writeFile(path.join(dir, "metadata.json"), JSON.stringify(metadata, null, 2));
@@ -572,6 +618,189 @@ async function restoreDbFilesFromBackup(home, backupDir) {
   return true;
 }
 
+async function restoreProviderMetadataFromBackup(home, backupDir, threadIds) {
+  const ids = uniqueStrings(threadIds);
+  if (!ids.length) return { restoredThreads: 0, restoredRows: 0 };
+  const backupDb = path.join(backupDir, "db", DB_NAME);
+  if (!(await pathExists(backupDb))) return { restoredThreads: 0, restoredRows: 0 };
+  const db = openDb(home);
+  let backupAlias = null;
+  try {
+    db.exec("PRAGMA busy_timeout = 5000");
+    db.exec("PRAGMA foreign_keys = OFF");
+    backupAlias = "backup_state";
+    db.exec(`ATTACH DATABASE ${sqlString(backupDb)} AS ${quoteIdent(backupAlias)}`);
+    if (!attachedTableColumns(db, backupAlias, "threads").size) {
+      return { restoredThreads: 0, restoredRows: 0 };
+    }
+    db.exec("BEGIN IMMEDIATE");
+    const params = [...ids];
+    const idPlaceholders = placeholders(params);
+    let restoredRows = 0;
+
+    const currentThreadColumns = getColumns(db, "threads");
+    const attachedThreadColumns = attachedTableColumns(db, backupAlias, "threads");
+    const columns = [...currentThreadColumns].filter((column) => attachedThreadColumns.has(column));
+    if (columns.length) {
+      const quotedColumns = columns.map(quoteIdent).join(", ");
+      const selectColumns = columns.map((column) => `${quoteIdent(backupAlias)}.${quoteIdent("threads")}.${quoteIdent(column)}`).join(", ");
+      db.prepare(`DELETE FROM threads WHERE id IN (${idPlaceholders})`).run(...params);
+      const insert = db.prepare(`
+        INSERT INTO threads (${quotedColumns})
+        SELECT ${selectColumns}
+        FROM ${quoteIdent(backupAlias)}.${quoteIdent("threads")}
+        WHERE id IN (${idPlaceholders})
+      `).run(...params);
+      restoredRows += Number(insert.changes ?? 0);
+    }
+
+    const childTables = [
+      "thread_dynamic_tools",
+      "thread_spawn_edges",
+      "agent_job_items"
+    ];
+    for (const table of childTables) {
+      if (!tableExists(db, table)) continue;
+      const attachedColumns = attachedTableColumns(db, backupAlias, table);
+      if (!attachedColumns.size) continue;
+      const columnsForTable = [...getColumns(db, table)].filter((column) => attachedColumns.has(column));
+      if (!columnsForTable.length) continue;
+      const quotedColumns = columnsForTable.map(quoteIdent).join(", ");
+      const selectColumns = columnsForTable.map((column) => `${quoteIdent(backupAlias)}.${quoteIdent(table)}.${quoteIdent(column)}`).join(", ");
+      let column;
+      let where;
+      if (table === "thread_spawn_edges") {
+        where = `(parent_thread_id IN (${idPlaceholders}) OR child_thread_id IN (${idPlaceholders}))`;
+        db.prepare(`DELETE FROM ${quoteIdent(table)} WHERE parent_thread_id IN (${idPlaceholders}) OR child_thread_id IN (${idPlaceholders})`).run(...params, ...params);
+        const info = db.prepare(`
+          INSERT OR IGNORE INTO ${quoteIdent(table)} (${quotedColumns})
+          SELECT ${selectColumns}
+          FROM ${quoteIdent(backupAlias)}.${quoteIdent(table)}
+          WHERE ${where}
+        `).run(...params, ...params);
+        restoredRows += Number(info.changes ?? 0);
+        continue;
+      }
+      column = table === "agent_job_items" ? "assigned_thread_id" : "thread_id";
+      if (!columnsForTable.includes(column)) continue;
+      db.prepare(`DELETE FROM ${quoteIdent(table)} WHERE ${quoteIdent(column)} IN (${idPlaceholders})`).run(...params);
+      const info = db.prepare(`
+        INSERT OR IGNORE INTO ${quoteIdent(table)} (${quotedColumns})
+        SELECT ${selectColumns}
+        FROM ${quoteIdent(backupAlias)}.${quoteIdent(table)}
+        WHERE ${quoteIdent(column)} IN (${idPlaceholders})
+      `).run(...params);
+      restoredRows += Number(info.changes ?? 0);
+    }
+
+    db.exec("COMMIT");
+    return { restoredThreads: ids.length, restoredRows };
+  } catch (error) {
+    try {
+      db.exec("ROLLBACK");
+    } catch {
+      // Preserve original error.
+    }
+    throw error;
+  } finally {
+    try {
+      if (backupAlias) db.exec(`DETACH DATABASE ${quoteIdent(backupAlias)}`);
+    } catch {
+      // Ignore detach cleanup failures after the main operation is done.
+    }
+    db.close();
+  }
+}
+
+async function restoreThreadProviderTagsFromBackup(home, backupDir, threadIds) {
+  const ids = uniqueStrings(threadIds);
+  if (!ids.length) return { restoredThreads: 0, restoredRows: 0 };
+  const backupDb = path.join(backupDir, "db", DB_NAME);
+  if (!(await pathExists(backupDb))) return { restoredThreads: 0, restoredRows: 0 };
+  const db = openDb(home);
+  let backupAlias = null;
+  try {
+    db.exec("PRAGMA busy_timeout = 5000");
+    backupAlias = "backup_state";
+    db.exec(`ATTACH DATABASE ${sqlString(backupDb)} AS ${quoteIdent(backupAlias)}`);
+    const currentColumns = getColumns(db, "threads");
+    const backupColumns = attachedTableColumns(db, backupAlias, "threads");
+    if (!currentColumns.has("model_provider") || !backupColumns.has("model_provider")) {
+      return { restoredThreads: 0, restoredRows: 0 };
+    }
+    const idPlaceholders = placeholders(ids);
+    db.exec("BEGIN IMMEDIATE");
+    const info = db.prepare(`
+      UPDATE threads
+      SET model_provider = (
+        SELECT ${quoteIdent("model_provider")}
+        FROM ${quoteIdent(backupAlias)}.${quoteIdent("threads")} AS backup_threads
+        WHERE backup_threads.id = threads.id
+      )
+      WHERE id IN (${idPlaceholders})
+        AND EXISTS (
+          SELECT 1
+          FROM ${quoteIdent(backupAlias)}.${quoteIdent("threads")} AS backup_threads
+          WHERE backup_threads.id = threads.id
+        )
+    `).run(...ids);
+    db.exec("COMMIT");
+    return { restoredThreads: ids.length, restoredRows: Number(info.changes ?? 0) };
+  } catch (error) {
+    try {
+      db.exec("ROLLBACK");
+    } catch {
+      // Preserve original error.
+    }
+    throw error;
+  } finally {
+    try {
+      if (backupAlias) db.exec(`DETACH DATABASE ${quoteIdent(backupAlias)}`);
+    } catch {
+      // Ignore detach cleanup failures after the main operation is done.
+    }
+    db.close();
+  }
+}
+
+async function alignThreadsToActiveProvider(home, threadIds) {
+  const target = summarizeConfig(await readTextIfPresent(configPath(home), "") ?? "").modelProvider;
+  const ids = uniqueStrings(threadIds);
+  if (!target || !ids.length) {
+    return { target: target ?? null, dbUpdated: 0, rolloutUpdated: 0 };
+  }
+  const threads = readThreads(home, { all: true, ids });
+  if (!threads.length) return { target, dbUpdated: 0, rolloutUpdated: 0 };
+  const db = openDb(home);
+  let dbUpdated = 0;
+  try {
+    db.exec("PRAGMA busy_timeout = 5000");
+    db.exec("BEGIN IMMEDIATE");
+    const info = db.prepare(`UPDATE threads SET model_provider = ? WHERE id IN (${placeholders(ids)}) AND model_provider <> ?`).run(target, ...ids, target);
+    db.exec("COMMIT");
+    dbUpdated = Number(info.changes ?? 0);
+  } catch (error) {
+    try {
+      db.exec("ROLLBACK");
+    } catch {
+      // Preserve original error.
+    }
+    throw error;
+  } finally {
+    db.close();
+  }
+
+  let rolloutUpdated = 0;
+  for (const thread of threads) {
+    if (!thread.rollout_path || !(await pathExists(thread.rollout_path)) || !isInsideDir(home, thread.rollout_path)) continue;
+    const prepared = await prepareRolloutProviderUpdate(thread.rollout_path, target);
+    if (!prepared.changed) continue;
+    await fs.writeFile(thread.rollout_path, prepared.content);
+    rolloutUpdated += 1;
+  }
+  return { target, dbUpdated, rolloutUpdated };
+}
+
 async function restoreMutableFilesFromBackup(home, backupDir) {
   for (const name of [GLOBAL_STATE, `${GLOBAL_STATE}.bak`, CONFIG_NAME, AUTH_NAME]) {
     const file = path.join(backupDir, name);
@@ -579,6 +808,18 @@ async function restoreMutableFilesFromBackup(home, backupDir) {
       await fs.copyFile(file, path.join(home, name));
     }
   }
+}
+
+async function restoreConfigFilesFromBackup(home, backupDir) {
+  let restored = 0;
+  for (const name of [CONFIG_NAME, AUTH_NAME]) {
+    const file = path.join(backupDir, name);
+    if (await pathExists(file)) {
+      await fs.copyFile(file, path.join(home, name));
+      restored += 1;
+    }
+  }
+  return restored;
 }
 
 async function restoreCopiedRolloutsFromBackup(backupDir) {
@@ -593,11 +834,259 @@ async function restoreCopiedRolloutsFromBackup(backupDir) {
   return restored;
 }
 
+async function restoreProviderTagsInCopiedRolloutsFromBackup(backupDir) {
+  const metadata = await readJsonIfPresent(path.join(backupDir, "metadata.json"), null);
+  let restored = 0;
+  for (const rollout of metadata?.copiedRollouts ?? []) {
+    if (!rollout?.backupPath || !rollout?.originalPath || !(await pathExists(rollout.backupPath))) continue;
+    if (!(await pathExists(rollout.originalPath))) continue;
+    let backupMeta;
+    try {
+      backupMeta = await readRolloutMeta(rollout.backupPath);
+    } catch {
+      continue;
+    }
+    if (!backupMeta.model_provider) continue;
+    const prepared = await prepareRolloutProviderUpdate(rollout.originalPath, backupMeta.model_provider);
+    if (!prepared.changed) continue;
+    await fs.writeFile(rollout.originalPath, prepared.content);
+    restored += 1;
+  }
+  return restored;
+}
+
+async function restoreTrashFilesFromBackup(home, backupDir) {
+  const trashRoot = path.join(backupDir, "trash");
+  async function restoreTrash(dir) {
+    let entries;
+    try {
+      entries = await fs.readdir(dir, { withFileTypes: true });
+    } catch (error) {
+      if (error?.code === "ENOENT") return 0;
+      throw error;
+    }
+    let restored = 0;
+    for (const entry of entries) {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        restored += await restoreTrash(full);
+      } else if (entry.isFile()) {
+        const relative = path.relative(trashRoot, full);
+        const destination = path.join(home, relative);
+        await fs.mkdir(path.dirname(destination), { recursive: true });
+        await fs.copyFile(full, destination);
+        restored += 1;
+      }
+    }
+    return restored;
+  }
+  return restoreTrash(trashRoot);
+}
+
 async function restoreMutationBackup(home, backupDir) {
   await restoreDbFilesFromBackup(home, backupDir);
   await restoreMutableFilesFromBackup(home, backupDir);
   const restoredRollouts = await restoreCopiedRolloutsFromBackup(backupDir);
   return { restoredRollouts };
+}
+
+function classifyBackup(reason, metadata = {}) {
+  const text = String(reason ?? "");
+  if (text.startsWith("trash-thread:")) {
+    return {
+      category: "chats",
+      kind: "chat",
+      title: "Deleted chat",
+      subject: text.slice("trash-thread:".length),
+      scopes: ["chats"]
+    };
+  }
+  if (text.startsWith("delete-project:")) {
+    return {
+      category: "chats",
+      kind: "project",
+      title: "Deleted project",
+      subject: text.slice("delete-project:".length),
+      scopes: ["chats"]
+    };
+  }
+  if (text.startsWith("config-sync:repair")) {
+    return {
+      category: "sync",
+      kind: "repair",
+      title: "Provider metadata repair",
+      subject: "SQLite / rollout mismatch repair",
+      scopes: ["metadata"]
+    };
+  }
+  if (text.startsWith("config-sync:")) {
+    return {
+      category: "sync",
+      kind: "retag",
+      title: "Provider retag",
+      subject: text.slice("config-sync:".length),
+      scopes: ["metadata"]
+    };
+  }
+  if (text.startsWith("profile-switch:")) {
+    return {
+      category: "providers",
+      kind: "profile-switch",
+      title: "Provider switch",
+      subject: text.slice("profile-switch:".length),
+      scopes: ["config"]
+    };
+  }
+  if (text.startsWith("config-file-write:")) {
+    return {
+      category: "providers",
+      kind: "config-file",
+      title: "Config file edit",
+      subject: text.slice("config-file-write:".length),
+      scopes: ["config"]
+    };
+  }
+  if (text.startsWith("config-fix-reserved:")) {
+    return {
+      category: "providers",
+      kind: "config-fix",
+      title: "Provider config fix",
+      subject: text.slice("config-fix-reserved:".length),
+      scopes: ["config"]
+    };
+  }
+  if (text.startsWith("pre-restore:")) {
+    return {
+      category: "providers",
+      kind: "pre-restore",
+      title: "Pre-restore safety backup",
+      subject: text.slice("pre-restore:".length),
+      scopes: ["config"]
+    };
+  }
+  if (text.startsWith("config-") || text === "config-fields") {
+    return {
+      category: "providers",
+      kind: "config",
+      title: "Config snapshot",
+      subject: text || "config",
+      scopes: ["config"]
+    };
+  }
+  if ((metadata.threadIds ?? []).length || (metadata.copiedRollouts ?? []).length) {
+    return {
+      category: "chats",
+      kind: "chat-state",
+      title: "Chat state backup",
+      subject: `${metadata.threadIds?.length ?? 0} chat(s)`,
+      scopes: ["chats"]
+    };
+  }
+  return {
+    category: "providers",
+    kind: "snapshot",
+    title: "State snapshot",
+    subject: text || "backup",
+    scopes: ["config"]
+  };
+}
+
+async function backupFileFlags(backupPath) {
+  const files = {
+    db: await pathExists(path.join(backupPath, "db", DB_NAME)),
+    config: await pathExists(path.join(backupPath, CONFIG_NAME)),
+    auth: await pathExists(path.join(backupPath, AUTH_NAME)),
+    globalState: await pathExists(path.join(backupPath, GLOBAL_STATE)),
+    trashManifest: await pathExists(path.join(backupPath, "trash-manifest.json"))
+  };
+  files.mutable = files.config || files.auth || files.globalState;
+  return files;
+}
+
+function readBackupThreadSummaries(backupPath, threadIds) {
+  const ids = uniqueStrings(threadIds);
+  if (!ids.length) return [];
+  const backupDb = path.join(backupPath, "db", DB_NAME);
+  const db = new DatabaseSync(backupDb, { readOnly: true });
+  try {
+    const rows = db.prepare(`
+      SELECT
+        id, rollout_path, created_at, updated_at, source, thread_source,
+        model_provider, cwd, title, archived, archived_at, has_user_event,
+        first_user_message, preview
+      FROM threads
+      WHERE id IN (${placeholders(ids)})
+      ORDER BY updated_at DESC, id DESC
+    `).all(...ids);
+    return rows.map(compactThreadSummary);
+  } catch {
+    return [];
+  } finally {
+    db.close();
+  }
+}
+
+async function readBackupGlobalState(backupPath) {
+  return readJsonIfPresent(path.join(backupPath, GLOBAL_STATE), {});
+}
+
+function enrichBackupChatContext(chatSummaries, backupState) {
+  const projectlessIds = new Set(
+    Array.isArray(backupState?.["projectless-thread-ids"])
+      ? backupState["projectless-thread-ids"].filter((id) => typeof id === "string" && id)
+      : []
+  );
+  const hints = backupState?.["thread-workspace-root-hints"] && typeof backupState["thread-workspace-root-hints"] === "object"
+    ? backupState["thread-workspace-root-hints"]
+    : {};
+  const roots = savedProjectRoots(backupState);
+  return chatSummaries.map((thread) => {
+    const workspaceRootHint = typeof hints[thread.id] === "string" ? hints[thread.id] : "";
+    const projectless = projectlessIds.has(thread.id);
+    const savedProjectRoot = projectless
+      ? ""
+      : findSavedProjectRoot(thread.cwd, roots) || findSavedProjectRoot(workspaceRootHint, roots);
+    return {
+      ...thread,
+      projectless,
+      workspaceRootHint,
+      savedProjectRoot
+    };
+  });
+}
+
+async function backupSummary(backupPath, name, metadata, stat, home) {
+  const reason = metadata?.reason ?? "";
+  const classification = classifyBackup(reason, metadata ?? {});
+  const files = await backupFileFlags(backupPath);
+  const backupState = files.globalState ? await readBackupGlobalState(backupPath) : {};
+  const savedRoots = savedProjectRoots(backupState);
+  const projectRoot = classification.category === "chats" && classification.kind === "project"
+    ? findSavedProjectRoot(classification.subject, savedRoots)
+    : "";
+  const chatSummaries = Array.isArray(metadata?.chatSummaries)
+    ? metadata.chatSummaries.map(compactThreadSummary)
+    : files.db
+      ? readBackupThreadSummaries(backupPath, metadata?.threadIds ?? [])
+      : [];
+  const enrichedChatSummaries = enrichBackupChatContext(chatSummaries, backupState);
+  return {
+    name,
+    path: backupPath,
+    createdAt: metadata?.createdAt ?? stat.mtime.toISOString(),
+    reason,
+    category: classification.category,
+    kind: classification.kind,
+    title: classification.title,
+    subject: classification.subject,
+    projectRoot,
+    scopes: classification.scopes,
+    files,
+    threadIds: metadata?.threadIds ?? [],
+    chatSummaries: enrichedChatSummaries,
+    copiedRollouts: metadata?.copiedRollouts ?? [],
+    codexHome: metadata?.codexHome ?? home
+  };
 }
 
 async function listBackups(home) {
@@ -619,14 +1108,7 @@ async function listBackups(home) {
       metadata = null;
     }
     const stat = await fs.stat(backupPath);
-    backups.push({
-      name: entry.name,
-      path: backupPath,
-      createdAt: metadata?.createdAt ?? stat.mtime.toISOString(),
-      reason: metadata?.reason ?? "",
-      threadIds: metadata?.threadIds ?? [],
-      codexHome: metadata?.codexHome ?? home
-    });
+    backups.push(await backupSummary(backupPath, entry.name, metadata, stat, home));
   }
   return backups.sort((left, right) => right.createdAt.localeCompare(left.createdAt));
 }
@@ -688,6 +1170,105 @@ function removeThreadRefsFromGlobalState(state, ids) {
       for (const id of idSet) delete holder[key][id];
     }
   }
+}
+
+function mergeThreadRefsIntoGlobalState(targetState, backupState, ids) {
+  const idSet = new Set(uniqueStrings(ids));
+  if (!idSet.size) return { arrays: 0, objects: 0 };
+  let arrays = 0;
+  let objects = 0;
+  const arrayKeys = ["projectless-thread-ids", "pinned-thread-ids"];
+  for (const key of arrayKeys) {
+    const backupValues = Array.isArray(backupState?.[key]) ? backupState[key].filter((id) => idSet.has(id)) : [];
+    if (!backupValues.length) continue;
+    const current = Array.isArray(targetState[key]) ? targetState[key] : [];
+    const seen = new Set(current);
+    for (const id of backupValues) {
+      if (seen.has(id)) continue;
+      current.push(id);
+      seen.add(id);
+      arrays += 1;
+    }
+    targetState[key] = current;
+  }
+
+  const objectKeys = [
+    "thread-workspace-root-hints",
+    "thread-projectless-output-directories"
+  ];
+  const backupPersisted = backupState?.["electron-persisted-atom-state"];
+  const targetPersisted = targetState["electron-persisted-atom-state"];
+  if (backupPersisted && typeof backupPersisted === "object") {
+    if (!targetState["electron-persisted-atom-state"] || typeof targetState["electron-persisted-atom-state"] !== "object") {
+      targetState["electron-persisted-atom-state"] = {};
+    }
+    objectKeys.push("heartbeat-thread-permissions-by-id");
+    if (backupPersisted["unread-thread-ids-by-host-v1"] && typeof backupPersisted["unread-thread-ids-by-host-v1"] === "object") {
+      const targetUnread = targetState["electron-persisted-atom-state"]["unread-thread-ids-by-host-v1"] ?? {};
+      for (const [host, values] of Object.entries(backupPersisted["unread-thread-ids-by-host-v1"])) {
+        if (!Array.isArray(values)) continue;
+        const matching = values.filter((id) => idSet.has(id));
+        if (!matching.length) continue;
+        const current = Array.isArray(targetUnread[host]) ? targetUnread[host] : [];
+        const seen = new Set(current);
+        for (const id of matching) {
+          if (seen.has(id)) continue;
+          current.push(id);
+          seen.add(id);
+          arrays += 1;
+        }
+        targetUnread[host] = current;
+      }
+      targetState["electron-persisted-atom-state"]["unread-thread-ids-by-host-v1"] = targetUnread;
+    }
+  }
+  for (const key of objectKeys) {
+    const backupHolder = key === "heartbeat-thread-permissions-by-id" ? backupPersisted : backupState;
+    if (!backupHolder?.[key] || typeof backupHolder[key] !== "object" || Array.isArray(backupHolder[key])) continue;
+    const targetHolder = key === "heartbeat-thread-permissions-by-id" ? targetState["electron-persisted-atom-state"] : targetState;
+    if (!targetHolder[key] || typeof targetHolder[key] !== "object" || Array.isArray(targetHolder[key])) {
+      targetHolder[key] = {};
+    }
+    for (const id of idSet) {
+      if (!(id in backupHolder[key])) continue;
+      targetHolder[key][id] = backupHolder[key][id];
+      objects += 1;
+    }
+  }
+  return { arrays, objects };
+}
+
+function mergeProjectRefsIntoGlobalState(targetState, backupState, projectPath) {
+  const target = normalizePathForCompare(projectPath);
+  if (!target) return { projects: 0 };
+  let projects = 0;
+  for (const key of ["electron-saved-workspace-roots", "project-order", "active-workspace-roots"]) {
+    const backupValues = Array.isArray(backupState?.[key])
+      ? backupState[key].filter((entry) => normalizePathForCompare(entry) === target)
+      : [];
+    if (!backupValues.length) continue;
+    const current = Array.isArray(targetState[key]) ? targetState[key] : [];
+    const seen = new Set(current.map(normalizePathForCompare).filter(Boolean));
+    for (const entry of backupValues) {
+      const normalized = normalizePathForCompare(entry);
+      if (!normalized || seen.has(normalized)) continue;
+      current.push(entry);
+      seen.add(normalized);
+      projects += 1;
+    }
+    targetState[key] = current;
+  }
+  return { projects };
+}
+
+async function restoreThreadRefsFromBackup(home, backupDir, threadIds, projectPath = null) {
+  const backupState = await readJsonIfPresent(path.join(backupDir, GLOBAL_STATE), null);
+  if (!backupState) return { arrays: 0, objects: 0, projects: 0, restored: false };
+  const state = await readJsonIfPresent(globalStatePath(home), {});
+  const merged = mergeThreadRefsIntoGlobalState(state, backupState, threadIds);
+  const projectRefs = mergeProjectRefsIntoGlobalState(state, backupState, projectPath);
+  await writeGlobalState(home, state);
+  return { ...merged, ...projectRefs, restored: true };
 }
 
 function removeProjectRootFromGlobalState(state, projectPath) {
@@ -841,45 +1422,59 @@ async function deleteProject(home, projectPath, { execute }) {
   };
 }
 
-async function restoreBackup(home, backupDir, execute) {
+async function restoreBackup(home, backupDir, execute, scope) {
   const source = path.resolve(backupDir);
   const metadata = await readJsonIfPresent(path.join(source, "metadata.json"), null);
   if (!metadata) {
     throw new Error(`Not a codex-chat-manager backup: ${source}`);
   }
+  const stat = await fs.stat(source);
+  const backup = await backupSummary(source, path.basename(source), metadata, stat, home);
+  const defaultScope = backup.scopes[0] ?? "config";
+  const safeScope = backup.scopes.includes(scope) ? scope : defaultScope;
   if (!execute) {
-    return { dryRun: true, backupDir: source, metadata };
+    return { dryRun: true, backupDir: source, metadata, backup, scope: safeScope };
   }
 
   const backupBeforeRestore = await createBackup(home, `pre-restore:${source}`, []);
-  await restoreDbFilesFromBackup(home, source);
-  await restoreMutableFilesFromBackup(home, source);
-  const trashRoot = path.join(source, "trash");
-  async function restoreTrash(dir) {
-    let entries;
-    try {
-      entries = await fs.readdir(dir, { withFileTypes: true });
-    } catch (error) {
-      if (error?.code === "ENOENT") return 0;
-      throw error;
+  let restoredDb = false;
+  let restoredMutable = false;
+  let restoredConfigFiles = 0;
+  let restoredMetadata = { restoredThreads: 0, restoredRows: 0 };
+  let alignedProvider = { target: null, dbUpdated: 0, rolloutUpdated: 0 };
+  let restoredThreadRefs = { arrays: 0, objects: 0, restored: false };
+  let restoredFiles = 0;
+  try {
+    if (safeScope === "config") {
+      restoredConfigFiles = await restoreConfigFilesFromBackup(home, source);
+      restoredMutable = true;
+    } else if (safeScope === "metadata") {
+      restoredMetadata = await restoreThreadProviderTagsFromBackup(home, source, metadata.threadIds ?? []);
+      restoredFiles = await restoreProviderTagsInCopiedRolloutsFromBackup(source);
+    } else if (safeScope === "chats") {
+      restoredMetadata = await restoreProviderMetadataFromBackup(home, source, metadata.threadIds ?? []);
+      restoredFiles = await restoreTrashFilesFromBackup(home, source);
+      restoredThreadRefs = await restoreThreadRefsFromBackup(home, source, metadata.threadIds ?? [], backup.projectRoot || null);
+      alignedProvider = await alignThreadsToActiveProvider(home, metadata.threadIds ?? []);
     }
-    let restored = 0;
-    for (const entry of entries) {
-      const full = path.join(dir, entry.name);
-      if (entry.isDirectory()) {
-        restored += await restoreTrash(full);
-      } else if (entry.isFile()) {
-        const relative = path.relative(trashRoot, full);
-        const destination = path.join(home, relative);
-        await fs.mkdir(path.dirname(destination), { recursive: true });
-        await fs.copyFile(full, destination);
-        restored += 1;
-      }
-    }
-    return restored;
+  } catch (error) {
+    await restoreMutationBackup(home, backupBeforeRestore);
+    throw error;
   }
-  const restoredFiles = await restoreTrash(trashRoot);
-  return { dryRun: false, backupDir: source, preRestoreBackup: backupBeforeRestore, restoredFiles };
+  return {
+    dryRun: false,
+    backupDir: source,
+    backup,
+    scope: safeScope,
+    preRestoreBackup: backupBeforeRestore,
+    restoredDb,
+    restoredMutable,
+    restoredConfigFiles,
+    restoredMetadata,
+    restoredThreadRefs,
+    alignedProvider,
+    restoredFiles
+  };
 }
 
 // --- Config / provider switching ----------------------------------------

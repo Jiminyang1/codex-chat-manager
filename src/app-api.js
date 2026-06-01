@@ -108,7 +108,7 @@ export async function invokeAction(action, payload = {}) {
     }
     case "backup:restore": {
       if (!payload.backupDir) throw new Error("backupDir is required");
-      return restoreBackup(home, payload.backupDir, executeFromPayload(payload));
+      return restoreBackup(home, payload.backupDir, executeFromPayload(payload), payload.scope);
     }
     case "config:get":
       return getConfigOverview(home);
