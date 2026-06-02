@@ -13,6 +13,7 @@
     "src",
     "electron",
     "renderer",
+    "build",
     "docs",
     "vite.config.ts",
     "tsconfig.json",
@@ -34,8 +35,37 @@
     "typecheck:renderer": "tsc -p tsconfig.renderer.json",
     "build": "npm run build:node && npm run typecheck:renderer && npm run build:renderer",
     "build:renderer": "vite build",
+    "dist:mac": "npm run build && electron-builder --mac",
     "pack:check": "npm run build --silent && npm pack --dry-run",
     "prepare": "npm run build"
+  },
+  "build": {
+    "appId": "dev.codex-chat-manager.app",
+    "productName": "Codex Manager",
+    "artifactName": "${productName}-${version}-${arch}.${ext}",
+    "directories": {
+      "output": "release",
+      "buildResources": "build"
+    },
+    "files": [
+      "dist/node/src/**/*",
+      "dist/node/electron/**/*",
+      "dist/renderer/**/*",
+      "package.json"
+    ],
+    "extraMetadata": {
+      "main": "dist/node/electron/main.js"
+    },
+    "mac": {
+      "category": "public.app-category.developer-tools",
+      "icon": "build/icon.icns",
+      "target": [
+        "dmg",
+        "zip"
+      ],
+      "hardenedRuntime": false,
+      "gatekeeperAssess": false
+    }
   },
   "engines": {
     "node": ">=24.0.0"
@@ -49,14 +79,6 @@
   ],
   "license": "MIT",
   "dependencies": {
-    "@vitejs/plugin-react": "^6.0.2",
-    "concurrently": "^9.2.1",
-    "electron": "^42.3.0",
-    "lucide-react": "^1.17.0",
-    "react": "^19.2.6",
-    "react-dom": "^19.2.6",
-    "vite": "^8.0.14",
-    "wait-on": "^9.0.3",
     "zod": "^4.4.3"
   },
   "devDependencies": {
@@ -64,7 +86,16 @@
     "@types/node": "^25.9.1",
     "@types/react": "^19.2.15",
     "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^6.0.2",
+    "concurrently": "^9.2.1",
+    "electron": "^42.3.2",
+    "electron-builder": "^26.8.1",
+    "lucide-react": "^1.17.0",
+    "react": "^19.2.7",
+    "react-dom": "^19.2.7",
     "tailwindcss": "^4.3.0",
-    "typescript": "^6.0.3"
+    "typescript": "^6.0.3",
+    "vite": "^8.0.16",
+    "wait-on": "^9.0.10"
   }
 }

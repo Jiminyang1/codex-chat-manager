@@ -6,6 +6,7 @@ yarn-error.log*
 pnpm-debug.log*
 coverage/
 dist/
+release/
 *.tgz
 .env
 .env.*

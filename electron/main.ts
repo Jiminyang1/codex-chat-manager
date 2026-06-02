@@ -4,8 +4,9 @@ import { fileURLToPath } from "node:url";
 import { allowedActions, invokeAction } from "../src/app-api.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const rootDir = path.resolve(__dirname, "..");
+const appRoot = path.resolve(__dirname, "..", "..", "..");
 const isDev = Boolean(process.env.VITE_DEV_SERVER_URL) || process.argv.includes("--dev") || !app.isPackaged;
+const appIcon = isDev ? path.join(appRoot, "build", "icon.icns") : undefined;
 
 async function assertNodeSqlite() {
   try {
@@ -75,6 +76,7 @@ async function createWindow() {
     minHeight: 560,
     title: "Codex Manager",
     backgroundColor: "#f5f5f4",
+    ...(appIcon ? { icon: appIcon } : {}),
     titleBarStyle: "hiddenInset",
     webPreferences: {
       preload: path.join(__dirname, "preload.cjs"),
@@ -93,7 +95,7 @@ async function createWindow() {
   if (isDev) {
     await win.loadURL(devUrl);
   } else {
-    await win.loadFile(path.join(rootDir, "dist", "renderer", "index.html"));
+    await win.loadFile(path.join(appRoot, "dist", "renderer", "index.html"));
   }
 }
 
@@ -106,6 +108,9 @@ ipcMain.handle("codex-manager:invoke", async (_event, action, payload = {}) => {
 
 app.whenReady().then(async () => {
   app.name = "Codex Manager";
+  if (appIcon && process.platform === "darwin") {
+    app.dock?.setIcon(appIcon);
+  }
   createMenu();
   await createWindow();
 

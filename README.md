@@ -62,6 +62,14 @@ npm run electron:dev
 
 This starts the Vite renderer and opens the Electron app. The desktop app uses an IPC bridge, so it does not depend on the local web server.
 
+macOS release app:
+
+```bash
+npm run dist:mac
+```
+
+This creates downloadable `.dmg` and `.zip` artifacts under `release/`. Local builds are unsigned unless you configure an Apple Developer signing identity and notarization; unsigned downloads may require users to approve the app in macOS Privacy & Security the first time they open it.
+
 Browser build:
 
 ```bash
@@ -121,6 +129,7 @@ Before publishing:
 ```bash
 npm run build
 npm test
+npm run dist:mac
 npm run pack:check
 ```
 
