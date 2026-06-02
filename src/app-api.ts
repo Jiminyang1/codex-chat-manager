@@ -96,6 +96,19 @@ export async function invokeAction(action: string, payload: unknown = {}): Promi
         reason: `trash-thread:${data.threadId}`
       });
     }
+    case "threads:trash": {
+      const data = parsedPayload as ActionPayload<"threads:trash">;
+      const threads = data.threadIds.map((threadId) => {
+        const thread = readThreadByRef(home, threadId);
+        if (!thread) throw new Error(`Chat not found: ${threadId}`);
+        return thread;
+      });
+      const uniqueThreads = [...new Map(threads.map((thread) => [thread.id, thread])).values()];
+      return trashThreads(home, uniqueThreads, {
+        execute: executeFromPayload(data),
+        reason: `trash-threads:${uniqueThreads.length}`
+      });
+    }
     case "project:delete": {
       const data = parsedPayload as ActionPayload<"project:delete">;
       return deleteProject(home, data.project, { execute: executeFromPayload(data) });

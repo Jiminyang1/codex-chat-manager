@@ -53,6 +53,49 @@ type OfficialSource = JsonRecord & {
   hasOfficialAuth?: boolean;
 };
 
+function providerBlockSignature(provider: JsonRecord | null | undefined): JsonRecord | null {
+  if (!provider) return null;
+  return {
+    key: provider.key ?? null,
+    name: provider.name ?? null,
+    baseUrl: provider.baseUrl ?? null,
+    wireApi: provider.wireApi ?? null,
+    requiresOpenaiAuth: provider.requiresOpenaiAuth ?? null,
+    envKey: provider.envKey ?? null
+  };
+}
+
+function providerConfigMatches(leftText: string | null, rightText: string): boolean {
+  if (leftText === null) return false;
+  const left = summarizeConfig(leftText);
+  const right = summarizeConfig(rightText);
+  return JSON.stringify({
+    modelProvider: left.modelProvider,
+    model: left.model,
+    provider: providerBlockSignature(left.provider)
+  }) === JSON.stringify({
+    modelProvider: right.modelProvider,
+    model: right.model,
+    provider: providerBlockSignature(right.provider)
+  });
+}
+
+function labelFromConfigSummary(summary: ReturnType<typeof summarizeConfig>): string {
+  const baseUrl = summary.provider?.baseUrl;
+  if (baseUrl) {
+    try {
+      const hostParts = new URL(baseUrl).hostname.split(".").filter(Boolean);
+      const hostLabel = hostParts.length > 1 ? hostParts.at(-2) : hostParts[0];
+      if (hostLabel) return hostLabel;
+    } catch {
+      const plain = String(baseUrl).replace(/^https?:\/\//, "").split(/[/:]/)[0]?.split(".").filter(Boolean);
+      const hostLabel = plain?.length > 1 ? plain.at(-2) : plain?.[0];
+      if (hostLabel) return hostLabel;
+    }
+  }
+  return summary.provider?.name || summary.modelProvider || "Custom provider";
+}
+
 function configPath(home: string): string {
   return path.join(home, CONFIG_NAME);
 }
@@ -456,7 +499,7 @@ async function listProfiles(home: string, currentText: string): Promise<Provider
   for (const { entry, providerId } of visible) {
     const file = path.join(profileDir(home), `${entry.id}.toml`);
     const snapshot = await readTextIfPresent(file, null);
-    const configMatchesCurrent = snapshot !== null && snapshot === currentText;
+    const configMatchesCurrent = providerConfigMatches(snapshot, currentText);
     profiles.push({
       id: entry.id,
       label: entry.label ?? entry.id,
@@ -497,11 +540,12 @@ async function getConfigOverview(home: string): Promise<ConfigOverview> {
   };
 }
 
-async function saveProfile(home: string, { label, note = "", kind }: { label: string; note?: string; kind?: string }): Promise<JsonRecord> {
-  if (!label) throw new Error("Profile label is required");
+async function saveProfile(home: string, { label, note = "", kind }: { label?: string; note?: string; kind?: string }): Promise<JsonRecord> {
   const text = await readTextIfPresent(configPath(home), null);
   if (text === null) throw new Error("No config.toml found to capture");
   const authText = await readTextIfPresent(authPath(home), null);
+  const summary = summarizeConfig(text);
+  const safeLabel = String(label ?? "").trim() || labelFromConfigSummary(summary);
   const id = `${timestamp()}-${Math.random().toString(36).slice(2, 6)}`;
   await fs.mkdir(profileDir(home), { recursive: true });
   await fs.writeFile(path.join(profileDir(home), `${id}.toml`), text);
@@ -509,11 +553,10 @@ async function saveProfile(home: string, { label, note = "", kind }: { label: st
   if (hasAuth) {
     await fs.writeFile(path.join(profileDir(home), `${id}.auth.json`), authText);
   }
-  const summary = summarizeConfig(text);
   const profiles = await readProfileIndex(home);
   const entry = {
     id,
-    label,
+    label: safeLabel,
     note,
     kind: kind ?? providerKind(summary.provider, summary.modelProvider),
     providerId: summary.modelProvider,

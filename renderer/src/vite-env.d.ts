@@ -4,6 +4,7 @@ import type { ActionName, ActionPayload, ActionResult } from "../../src/actions.
 
 declare global {
   interface Window {
+    __CODEX_MANAGER_TOKEN__?: string;
     codexManager?: {
       invoke<Action extends ActionName>(
         action: Action,
@@ -14,4 +15,3 @@ declare global {
 }
 
 export {};
-

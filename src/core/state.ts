@@ -27,6 +27,10 @@ type BackupClassification = {
   subject: string;
   scopes: BackupScope[];
 };
+type RestoredTrashFile = {
+  path: string;
+  existed: boolean;
+};
 
 function codexHome(flags: CliFlags): string {
   return path.resolve(flags["codex-home"] ?? process.env.CODEX_HOME ?? path.join(os.homedir(), ".codex"));
@@ -159,6 +163,10 @@ function uniqueStrings(values: unknown): string[] {
   return [...new Set(array.filter((value) => typeof value === "string" && value))];
 }
 
+function isBackupMetadata(value: unknown): value is JsonRecord {
+  return Boolean(value && typeof value === "object" && !Array.isArray(value) && (value as JsonRecord).version === 1);
+}
+
 function compactThreadSummary(thread: Thread): Thread {
   return {
     id: thread.id,
@@ -177,15 +185,16 @@ function compactThreadSummary(thread: Thread): Thread {
 function buildThreadQuery(flags: CliFlags): { sql: string | null; params: JsonRecord | null; empty?: boolean } {
   const where: string[] = [];
   const params: JsonRecord = {};
+  const archivedSpecified = Object.prototype.hasOwnProperty.call(flags, "archived") && flags.archived !== undefined;
 
-  if (!isTruthy(flags.all)) {
+  if (archivedSpecified) {
     if (isTruthy(flags.archived)) {
       where.push("archived = 1");
     } else {
       where.push("archived = 0");
     }
-  } else if (isTruthy(flags.archived)) {
-    where.push("archived = 1");
+  } else if (!isTruthy(flags.all)) {
+    where.push("archived = 0");
   }
 
   if (flags.provider) {
@@ -887,7 +896,15 @@ async function restoreProviderTagsInCopiedRolloutsFromBackup(backupDir: string):
   return restored;
 }
 
-async function restoreTrashFilesFromBackup(home: string, backupDir: string): Promise<number> {
+async function removeNewRestoredTrashFiles(files: RestoredTrashFile[]): Promise<void> {
+  for (const file of files) {
+    if (!file.existed) {
+      await fs.rm(file.path, { force: true });
+    }
+  }
+}
+
+async function restoreTrashFilesFromBackup(home: string, backupDir: string, restoredFiles: RestoredTrashFile[] = []): Promise<number> {
   const trashRoot = path.join(backupDir, "trash");
   async function restoreTrash(dir: string): Promise<number> {
     let entries;
@@ -905,8 +922,10 @@ async function restoreTrashFilesFromBackup(home: string, backupDir: string): Pro
       } else if (entry.isFile()) {
         const relative = path.relative(trashRoot, full);
         const destination = path.join(home, relative);
+        const existed = await pathExists(destination);
         await fs.mkdir(path.dirname(destination), { recursive: true });
         await fs.copyFile(full, destination);
+        restoredFiles.push({ path: destination, existed });
         restored += 1;
       }
     }
@@ -930,6 +949,15 @@ function classifyBackup(reason: unknown, metadata: JsonRecord = {}): BackupClass
       kind: "chat",
       title: "Deleted chat",
       subject: text.slice("trash-thread:".length),
+      scopes: ["chats"]
+    };
+  }
+  if (text.startsWith("trash-threads:")) {
+    return {
+      category: "chats",
+      kind: "chats",
+      title: "Deleted chats",
+      subject: text.slice("trash-threads:".length),
       scopes: ["chats"]
     };
   }
@@ -1140,6 +1168,7 @@ async function listBackups(home: string): Promise<BackupSummary[]> {
     } catch {
       metadata = null;
     }
+    if (!isBackupMetadata(metadata)) continue;
     const stat = await fs.stat(backupPath);
     backups.push(await backupSummary(backupPath, entry.name, metadata, stat, home));
   }
@@ -1471,7 +1500,7 @@ async function deleteProject(home: string, projectPath: string, { execute }: { e
 async function restoreBackup(home: string, backupDir: string, execute: boolean, scope?: BackupScope): Promise<JsonRecord> {
   const source = path.resolve(backupDir);
   const metadata = await readJsonIfPresent(path.join(source, "metadata.json"), null);
-  if (!metadata) {
+  if (!isBackupMetadata(metadata)) {
     throw new Error(`Not a codex-chat-manager backup: ${source}`);
   }
   const stat = await fs.stat(source);
@@ -1489,22 +1518,24 @@ async function restoreBackup(home: string, backupDir: string, execute: boolean, 
   let restoredMetadata = { restoredThreads: 0, restoredRows: 0 };
   let alignedProvider: { target: string | null; dbUpdated: number; rolloutUpdated: number } = { target: null, dbUpdated: 0, rolloutUpdated: 0 };
   let restoredThreadRefs: JsonRecord = { arrays: 0, objects: 0, restored: false };
-  let restoredFiles = 0;
+  let restoredFileCount = 0;
+  const restoredTrashFiles: RestoredTrashFile[] = [];
   try {
     if (safeScope === "config") {
       restoredConfigFiles = await restoreConfigFilesFromBackup(home, source);
       restoredMutable = true;
     } else if (safeScope === "metadata") {
       restoredMetadata = await restoreThreadProviderTagsFromBackup(home, source, metadata.threadIds ?? []);
-      restoredFiles = await restoreProviderTagsInCopiedRolloutsFromBackup(source);
+      restoredFileCount = await restoreProviderTagsInCopiedRolloutsFromBackup(source);
     } else if (safeScope === "chats") {
       restoredMetadata = await restoreProviderMetadataFromBackup(home, source, metadata.threadIds ?? []);
-      restoredFiles = await restoreTrashFilesFromBackup(home, source);
+      restoredFileCount = await restoreTrashFilesFromBackup(home, source, restoredTrashFiles);
       restoredThreadRefs = await restoreThreadRefsFromBackup(home, source, metadata.threadIds ?? [], backup.projectRoot || null);
       alignedProvider = await alignThreadsToActiveProvider(home, metadata.threadIds ?? []);
     }
   } catch (error) {
     await restoreMutationBackup(home, backupBeforeRestore);
+    await removeNewRestoredTrashFiles(restoredTrashFiles);
     throw error;
   }
   return {
@@ -1519,7 +1550,7 @@ async function restoreBackup(home: string, backupDir: string, execute: boolean, 
     restoredMetadata,
     restoredThreadRefs,
     alignedProvider,
-    restoredFiles
+    restoredFiles: restoredFileCount
   };
 }
 
@@ -1538,6 +1569,9 @@ async function deleteBackup(home: string, backupDir: string, { execute }: { exec
     throw new Error(`Backup is not a directory: ${source}`);
   }
   const metadata = await readJsonIfPresent(path.join(source, "metadata.json"), null);
+  if (!isBackupMetadata(metadata)) {
+    throw new Error(`Not a codex-chat-manager backup: ${source}`);
+  }
   const backup = await backupSummary(source, path.basename(source), metadata, stat, home);
   if (!execute) {
     return { dryRun: true, backupDir: source, backup, deleted: false };

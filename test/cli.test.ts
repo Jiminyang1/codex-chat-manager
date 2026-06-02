@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
+import { once } from "node:events";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -8,6 +9,7 @@ import { promisify } from "node:util";
 import test from "node:test";
 import { DatabaseSync } from "node:sqlite";
 import { invokeAction } from "../src/app-api.js";
+import { startServer } from "../src/server.js";
 
 const execFileAsync = promisify(execFile);
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -136,6 +138,44 @@ test("trash-thread moves rollout, removes indexes, and restore recovers them", a
   db.close();
 });
 
+test("threads:trash moves multiple chats in one backup", async () => {
+  const fixture = await makeFixture();
+  const secondId = "019e0000-0000-7000-8000-000000000003";
+  const secondRollout = path.join(fixture.home, "sessions", "2026", "05", "31", `rollout-second-${secondId}.jsonl`);
+  await fs.writeFile(secondRollout, "{}\n");
+  const db = new DatabaseSync(path.join(fixture.home, "state_5.sqlite"));
+  db.prepare(`
+    INSERT INTO threads (
+      id, rollout_path, created_at, updated_at, source, model_provider, cwd, title,
+      sandbox_policy, approval_mode, has_user_event, first_user_message, preview, thread_source
+    ) VALUES (?, ?, 1780000002, 1780000003, 'vscode', 'openai', ?, 'Second Fixture', '{}', 'never', 1, 'second', 'second', 'user')
+  `).run(secondId, secondRollout, fixture.project);
+  db.close();
+
+  const result = await invokeAction("threads:trash", {
+    codexHome: fixture.home,
+    threadIds: [fixture.threadId, secondId],
+    confirmed: true
+  });
+
+  assert.equal(result.trashed, 2);
+  assert.equal(result.threads.length, 2);
+  assert.equal(await exists(fixture.rolloutPath), false);
+  assert.equal(await exists(secondRollout), false);
+  const backupDir = result.backupDir;
+  assert.ok(backupDir);
+  assert.equal(result.moved.every((move: AnyRecord) => String(move.to).startsWith(path.join(backupDir, "trash"))), true);
+
+  const backupRows = await invokeAction("backups:list", { codexHome: fixture.home });
+  assert.equal(backupRows.length, 1);
+  assert.equal(backupRows[0].path, result.backupDir);
+  assert.deepEqual(new Set(backupRows[0].threadIds), new Set([fixture.threadId, secondId]));
+
+  const readDb = new DatabaseSync(path.join(fixture.home, "state_5.sqlite"), { readOnly: true });
+  assert.equal((readDb.prepare("SELECT COUNT(*) AS count FROM threads").get() as AnyRecord).count, 0);
+  readDb.close();
+});
+
 test("delete-project trashes exact-cwd threads by default and removes project roots", async () => {
   const fixture = await makeFixture();
   const deleted = await runCli(["delete-project", fixture.project, "--codex-home", fixture.home, "--yes", "--json"]);
@@ -182,6 +222,42 @@ test("projects are saved workspace roots and projectless chats are separate", as
 
   const projectless = await invokeAction("projectlessThreads:list", { codexHome: fixture.home });
   assert.deepEqual(projectless.map((thread) => thread.id), [transientId]);
+});
+
+test("app thread actions keep active and archived filters distinct", async () => {
+  const fixture = await makeFixture();
+  const archivedId = "019e0000-0000-7000-8000-000000000002";
+  const archivedRollout = path.join(fixture.home, "archived_sessions", `rollout-${archivedId}.jsonl`);
+  await fs.writeFile(archivedRollout, "{}\n");
+  const db = new DatabaseSync(path.join(fixture.home, "state_5.sqlite"));
+  db.prepare(`
+    INSERT INTO threads (
+      id, rollout_path, created_at, updated_at, source, model_provider, cwd, title,
+      sandbox_policy, approval_mode, has_user_event, archived, archived_at,
+      first_user_message, preview, thread_source
+    ) VALUES (?, ?, 1780000004, 1780000005, 'vscode', 'openai', ?, 'Archived Fixture', '{}', 'never', 1, 1, 1780000005, 'archived', 'archived', 'user')
+  `).run(archivedId, archivedRollout, fixture.project);
+  db.close();
+
+  const statePath = path.join(fixture.home, ".codex-global-state.json");
+  const state = JSON.parse(await fs.readFile(statePath, "utf8"));
+  state["projectless-thread-ids"] = [fixture.threadId, archivedId];
+  await fs.writeFile(statePath, JSON.stringify(state, null, 2));
+
+  const activeProject = await invokeAction("threads:list", { codexHome: fixture.home, project: fixture.project, archived: false });
+  assert.deepEqual(activeProject.map((thread) => thread.id), [fixture.threadId]);
+
+  const archivedProject = await invokeAction("threads:list", { codexHome: fixture.home, project: fixture.project, archived: true });
+  assert.deepEqual(archivedProject.map((thread) => thread.id), [archivedId]);
+
+  const allProject = await invokeAction("threads:list", { codexHome: fixture.home, project: fixture.project });
+  assert.deepEqual(new Set(allProject.map((thread) => thread.id)), new Set([fixture.threadId, archivedId]));
+
+  const activeProjectless = await invokeAction("projectlessThreads:list", { codexHome: fixture.home, archived: false });
+  assert.deepEqual(activeProjectless.map((thread) => thread.id), [fixture.threadId]);
+
+  const archivedProjectless = await invokeAction("projectlessThreads:list", { codexHome: fixture.home, archived: true });
+  assert.deepEqual(archivedProjectless.map((thread) => thread.id), [archivedId]);
 });
 
 test("friendly aliases and short chat ids work", async () => {
@@ -253,6 +329,26 @@ test("delete-backup removes backup snapshots and supports backup numbers", async
     }),
     /Refusing to delete backup outside/
   );
+});
+
+test("backup listing and deletion ignore directories without manager metadata", async () => {
+  const fixture = await makeFixture();
+  const strayDir = path.join(fixture.home, "backups_state", "chat-manager", "manual-folder");
+  await fs.mkdir(strayDir, { recursive: true });
+  await fs.writeFile(path.join(strayDir, "note.txt"), "not a chat-manager backup");
+
+  const backups = await invokeAction("backups:list", { codexHome: fixture.home });
+  assert.equal(backups.some((backup) => backup.path === strayDir), false);
+
+  await assert.rejects(
+    invokeAction("backup:delete", {
+      codexHome: fixture.home,
+      backupDir: strayDir,
+      confirmed: true
+    }),
+    /Not a codex-chat-manager backup/
+  );
+  assert.equal(await exists(path.join(strayDir, "note.txt")), true);
 });
 
 test("backup summaries keep unsaved Codex cwd chats projectless", async () => {
@@ -492,6 +588,27 @@ test("save-profile captures both config.toml and auth.json", async () => {
   // The auth.json snapshot matches the original.
   const authSnapshot = JSON.parse(await fs.readFile(path.join(profileDir, `${saved.profile.id}.auth.json`), "utf8"));
   assert.equal(authSnapshot.auth_mode, "chatgpt");
+});
+
+test("save-profile can import current config with an inferred provider label", async () => {
+  const home = await makeConfigHome('model_provider = "OpenAI"\nmodel = "gpt-5.5"\n\n[model_providers.OpenAI]\nname = "OpenAI"\nbase_url = "https://axis.yoga"\nwire_api = "responses"\nrequires_openai_auth = true\n');
+
+  const result = await invokeAction("profile:save", {
+    codexHome: home,
+    label: "",
+    note: "Imported from current Codex config.",
+    kind: "third-party"
+  });
+
+  assert.equal(result.saved, true);
+  assert.equal(result.profile.label, "axis");
+  assert.equal(result.profile.providerId, "OpenAI");
+  assert.equal(result.profile.hasAuth, true);
+
+  const overview = await invokeAction("config:get", { codexHome: home });
+  const profile = overview.profiles.find((item) => item.id === result.profile.id);
+  assert.equal(profile?.label, "axis");
+  assert.equal(profile?.active, true);
 });
 
 test("save-profile without auth.json records hasAuth:false", async () => {
@@ -915,6 +1032,23 @@ test("config:get shows an existing profile active by provider id", async () => {
   assert.equal(await exists(path.join(home, "chat-manager-profiles", "current-provider-openai-custom.toml")), false);
 });
 
+test("config:get keeps a provider profile active when current config has unrelated Codex sections", async () => {
+  const providerOnly = 'model_provider = "OpenAI"\nmodel = "gpt-5.5"\n\n[model_providers.OpenAI]\nname = "OpenAI"\nbase_url = "https://axis.yoga"\nwire_api = "responses"\nrequires_openai_auth = true\n';
+  const currentConfig = `${providerOnly}\n[features]\ngoals = true\n\n[mcp_servers.node_repl]\ncommand = "/Applications/Codex.app/Contents/Resources/node_repl"\n`;
+  const home = await makeConfigHome(currentConfig);
+  const saved = JSON.parse((await runCli(["config-save-profile", "axis", "--codex-home", home, "--json"])).stdout);
+  await fs.writeFile(path.join(home, "chat-manager-profiles", `${saved.profile.id}.toml`), providerOnly);
+
+  const overview = await invokeAction("config:get", { codexHome: home });
+  const matching = overview.profiles.find((profile) => profile.id === saved.profile.id);
+
+  assert.equal(overview.kind, "third-party");
+  assert.equal(overview.modelProvider, "OpenAI");
+  assert.equal(matching?.label, "axis");
+  assert.equal(matching?.providerId, "OpenAI");
+  assert.equal(matching?.active, true);
+});
+
 test("config:get does not mark a stale profile active after external config edits", async () => {
   const home = await makeConfigHome();
   const saved = JSON.parse((await runCli(["config-save-profile", "axis", "--codex-home", home, "--json"])).stdout);
@@ -1189,9 +1323,55 @@ test("action schema rejects invalid payloads before mutations run", async () => 
     /Invalid payload for thread:trash: threadId/
   );
   await assert.rejects(
+    invokeAction("threads:trash", { threadIds: [] }),
+    /Invalid payload for threads:trash: threadIds/
+  );
+  await assert.rejects(
     invokeAction("config:sync", { mode: "merge" }),
     /Invalid payload for config:sync: mode/
   );
+});
+
+test("web API requires JSON POSTs with the runtime token", async () => {
+  const fixture = await makeFixture();
+  const server = startServer({ port: 0, securityToken: "test-token" });
+  await once(server, "listening");
+  const address = server.address() as AnyRecord;
+  const baseUrl = `http://127.0.0.1:${address.port}`;
+  try {
+    const index = await fetch(baseUrl);
+    assert.equal(index.status, 200);
+    assert.match(await index.text(), /__CODEX_MANAGER_TOKEN__="test-token"/);
+
+    const textPost = await fetch(`${baseUrl}/api/action`, {
+      method: "POST",
+      headers: { "content-type": "text/plain" },
+      body: JSON.stringify({ action: "status:get", payload: { codexHome: fixture.home } })
+    });
+    assert.equal(textPost.status, 415);
+
+    const missingToken = await fetch(`${baseUrl}/api/action`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ action: "status:get", payload: { codexHome: fixture.home } })
+    });
+    assert.equal(missingToken.status, 403);
+
+    const ok = await fetch(`${baseUrl}/api/action`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-codex-manager-token": "test-token"
+      },
+      body: JSON.stringify({ action: "status:get", payload: { codexHome: fixture.home } })
+    });
+    assert.equal(ok.status, 200);
+    assert.equal((await ok.json()).codexHome, fixture.home);
+  } finally {
+    const closed = once(server, "close");
+    server.close();
+    await closed;
+  }
 });
 
 test("Codex Desktop process actions are exposed", async () => {
@@ -1204,6 +1384,7 @@ test("renderer adapter supports Electron IPC and Web HTTP", async () => {
   const api = await fs.readFile(path.join(sourceRoot, "renderer", "src", "api.ts"), "utf8");
   assert.match(api, /window\.codexManager\?\.invoke/);
   assert.ok(api.includes('fetch("/api/action"'));
+  assert.match(api, /x-codex-manager-token/);
 });
 
 async function exists(filePath: string): Promise<boolean> {

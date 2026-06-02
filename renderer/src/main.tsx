@@ -26,6 +26,7 @@ import { ThreadDetail } from "./components/ThreadDetail";
 import logoUrl from "./assets/logo.svg";
 import {
   backupBulkDeleteMessage,
+  backupDeleteMessage,
   backupGroupMeta,
   backupProjectLabel,
   backupProjectPath,
@@ -108,6 +109,7 @@ type ShellStyle = CSSProperties & {
 
 const MUTATIONS_REQUIRING_CODEX_CLOSED = new Set<ActionName>([
   "thread:trash",
+  "threads:trash",
   "project:delete",
   "backup:restore",
   "config:file:write",
@@ -168,6 +170,8 @@ function App() {
   const [selectedProjectlessThreadId, setSelectedProjectlessThreadId] = useState("");
   const [selectedProvider, setSelectedProvider] = useState("");
   const [selectedThreadId, setSelectedThreadId] = useState("");
+  const [selectedThreadIds, setSelectedThreadIds] = useState<Set<string>>(() => new Set());
+  const [selectMode, setSelectMode] = useState(false);
   const [selectedSyncMode, setSelectedSyncMode] = useState<SyncMode>("repair");
   const [backupCategory, setBackupCategory] = useState<BackupCategory>("chats");
   const [selectedBackupPath, setSelectedBackupPath] = useState("");
@@ -224,6 +228,9 @@ function App() {
     ?? visibleThreads.find((thread) => thread.id === selectedProjectlessThreadId)
     ?? visibleThreads[0]
     ?? null;
+  const selectedThreadList = visibleThreads.filter((thread) => selectedThreadIds.has(thread.id));
+  const selectedThreadCount = selectedThreadList.length;
+  const allVisibleThreadsSelected = visibleThreads.length > 0 && selectedThreadCount === visibleThreads.length;
   const activeProvider = config?.modelProvider ?? "";
   const retagCount = status && activeProvider && Number.isFinite(status.providerSyncMismatchCount)
     ? status.providerSyncMismatchCount
@@ -258,6 +265,8 @@ function App() {
   const selectedSyncItem = syncItems.find((item) => item.id === selectedSyncMode) ?? syncItems[0];
   const providerItems = useMemo<ProviderItem[]>(() => {
     const savedProfiles = config?.profiles ?? [];
+    const currentHostParts = String(config?.provider?.baseUrl ?? "").replace(/^https?:\/\//, "").split(/[/:]/)[0]?.split(".").filter(Boolean) ?? [];
+    const currentTitle = currentHostParts.length > 1 ? currentHostParts.at(-2) : currentHostParts[0];
     const officialItem: ProviderItem = {
       id: "official",
       title: "OpenAI Official",
@@ -277,7 +286,7 @@ function App() {
     const currentItem = activeProvider && !hasActiveSavedItem
       ? [{
           id: "current-config",
-          title: "Detected current config",
+          title: currentTitle || config?.provider?.name || activeProvider,
           badge: "not saved",
           active: true,
           current: true,
@@ -365,6 +374,55 @@ function App() {
       }
       return next;
     });
+  }
+
+  function exitSelectMode(): void {
+    setSelectMode(false);
+    setSelectedThreadIds(new Set());
+    setSelectedBackupPaths(new Set());
+  }
+
+  function toggleThreadSelection(threadId: string, checked: boolean): void {
+    setSelectedThreadIds((current) => {
+      const next = new Set(current);
+      if (checked) next.add(threadId);
+      else next.delete(threadId);
+      return next;
+    });
+  }
+
+  function toggleVisibleThreadSelection(checked: boolean): void {
+    setSelectedThreadIds((current) => {
+      const next = new Set(current);
+      for (const thread of visibleThreads) {
+        if (checked) next.add(thread.id);
+        else next.delete(thread.id);
+      }
+      return next;
+    });
+  }
+
+  async function deleteSelectedThreads(): Promise<boolean> {
+    const targets = visibleThreads.filter((thread) => selectedThreadIds.has(thread.id));
+    if (!targets.length || runningActionRef.current) return false;
+    runningActionRef.current = "threads:trash";
+    setRunningAction("threads:trash");
+    try {
+      if (!(await ensureCodexClosed(deleteSelectedThreads))) return false;
+      await invoke("threads:trash", { codexHome, threadIds: targets.map((thread) => thread.id), confirmed: true });
+      const deletedCount = targets.length;
+      setModal(null);
+      setSelectedThreadIds(new Set());
+      notify(`${deletedCount} chat${deletedCount === 1 ? "" : "s"} moved to backup`);
+      await loadAll();
+      return true;
+    } catch (error) {
+      notify(error instanceof Error ? error.message : String(error));
+      return false;
+    } finally {
+      runningActionRef.current = "";
+      setRunningAction("");
+    }
   }
 
   async function deleteSelectedBackups(): Promise<boolean> {
@@ -492,6 +550,7 @@ function App() {
 
   useEffect(() => {
     loadThreads();
+    setSelectedThreadIds(new Set());
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedProject, selectedProvider, archived]);
 
@@ -785,8 +844,33 @@ function App() {
     }
   }
 
+  async function importCurrentProvider(): Promise<boolean> {
+    if (runningActionRef.current) return false;
+    runningActionRef.current = "profile:save";
+    setRunningAction("profile:save");
+    try {
+      const result = await invoke("profile:save", {
+        codexHome,
+        label: "",
+        note: "Imported from current Codex config.",
+        kind: config?.kind || undefined
+      });
+      setSelectedProviderCard(result.profile.id);
+      notify(`Imported ${result.profile.label}`);
+      await loadAll();
+      return true;
+    } catch (error) {
+      notify(error instanceof Error ? error.message : String(error));
+      return false;
+    } finally {
+      runningActionRef.current = "";
+      setRunningAction("");
+    }
+  }
+
   function selectView(nextView: View): void {
     setView(nextView);
+    exitSelectMode();
     if (nextView !== "chats") {
       setSelectedProject("");
       setSelectedProjectlessThreadId("");
@@ -867,7 +951,7 @@ function App() {
             {BACKUP_CATEGORIES.map((category) => {
               const Icon = category.icon;
               return (
-                <button className={`side-item side-item-icon ${backupCategory === category.id ? "selected" : ""}`} key={category.id} onClick={() => { setBackupCategory(category.id); setSelectedBackupPath(""); }} type="button">
+                <button className={`side-item side-item-icon ${backupCategory === category.id ? "selected" : ""}`} key={category.id} onClick={() => { setBackupCategory(category.id); setSelectedBackupPath(""); exitSelectMode(); }} type="button">
                   <span><Icon size={14} /> {category.label}</span><strong>{backupCounts[category.id] ?? 0}</strong>
                 </button>
               );
@@ -894,20 +978,64 @@ function App() {
               <>
                 <div className="pane-head">
                   <div><h1>Chats</h1><p>{visibleThreads.length} shown · {status?.totals?.threads ?? 0} total · db {status?.integrity ?? "-"}</p></div>
-                  <div className="pane-actions segmented thread-state-control" role="group" aria-label="Chat state">
-                    <button className={!archived ? "active" : ""} onClick={() => setArchived(false)} type="button">Active</button>
-                    <button className={archived ? "active" : ""} onClick={() => setArchived(true)} type="button">Archived</button>
+                  <div className="pane-actions pane-tools">
+                    <div className="segmented thread-state-control" role="group" aria-label="Chat state">
+                      <button className={!archived ? "active" : ""} onClick={() => setArchived(false)} type="button">Active</button>
+                      <button className={archived ? "active" : ""} onClick={() => setArchived(true)} type="button">Archived</button>
+                    </div>
+                    {visibleThreads.length > 0 && (
+                      <button className={`select-toggle ${selectMode ? "on" : ""}`} onClick={() => selectMode ? exitSelectMode() : setSelectMode(true)} type="button">{selectMode ? "Done" : "Select"}</button>
+                    )}
                   </div>
                 </div>
-                <div className="rows">
-                  {visibleThreads.map((thread) => (
-                    <button className={`row ${selectedThread?.id === thread.id ? "selected" : ""}`} key={thread.id} onClick={() => setSelectedThreadId(thread.id)} type="button">
-                      <div className="row-main">
-                        <strong>{thread.title || "(untitled)"}</strong>
-                        <span>{projectName(thread.cwd)} · {thread.model_provider} · {formatDate(thread.updated_at)}</span>
+                {selectMode && visibleThreads.length > 0 && (
+                  <div className={`select-bar ${selectedThreadCount ? "active" : ""}`}>
+                    <label className="select-check">
+                      <input
+                        ref={(el) => { if (el) el.indeterminate = selectedThreadCount > 0 && !allVisibleThreadsSelected; }}
+                        checked={allVisibleThreadsSelected}
+                        onChange={(event) => toggleVisibleThreadSelection(event.currentTarget.checked)}
+                        type="checkbox"
+                      />
+                      <span>{selectedThreadCount ? `${selectedThreadCount} selected` : "Select all"}</span>
+                    </label>
+                    {selectedThreadCount > 0 && (
+                      <div className="select-bar-actions">
+                        <button className="link-button" onClick={() => setSelectedThreadIds(new Set())} type="button">Clear</button>
+                        <button className="danger ghost compact" disabled={Boolean(runningAction)} onClick={() => setModal({
+                          title: "Delete selected chats",
+                          body: [
+                            `Move ${selectedThreadCount} selected chat${selectedThreadCount === 1 ? "" : "s"} to backup.`,
+                            "",
+                            "Each chat moves into a restorable backup. You can bring them back from Backups.",
+                            "",
+                            ...selectedThreadList.slice(0, 6).map((thread) => `- ${thread.title || "(untitled)"}`),
+                            ...(selectedThreadCount > 6 ? [`- ${selectedThreadCount - 6} more`] : [])
+                          ].join("\n"),
+                          confirmLabel: `Delete ${selectedThreadCount}`,
+                          tone: "danger",
+                          action: deleteSelectedThreads
+                        })} type="button"><Trash2 size={14} /> Delete {selectedThreadCount}</button>
                       </div>
-                      <ChevronRight size={15} />
-                    </button>
+                    )}
+                  </div>
+                )}
+                <div className={`rows ${selectMode ? "selecting" : ""}`}>
+                  {visibleThreads.map((thread) => (
+                    <div className={`row select-row ${!selectMode && selectedThread?.id === thread.id ? "selected" : ""} ${selectMode && selectedThreadIds.has(thread.id) ? "checked" : ""}`} key={thread.id}>
+                      <label className="check-cell" title="Select chat">
+                        <input aria-label={`Select ${thread.title || "(untitled)"}`} checked={selectedThreadIds.has(thread.id)} onChange={(event) => toggleThreadSelection(thread.id, event.currentTarget.checked)} type="checkbox" />
+                      </label>
+                      <button className="row-content" onClick={() => selectMode ? toggleThreadSelection(thread.id, !selectedThreadIds.has(thread.id)) : setSelectedThreadId(thread.id)} type="button">
+                        <div className="row-main">
+                          <strong>{thread.title || "(untitled)"}</strong>
+                          <span>{projectName(thread.cwd)} · {thread.model_provider} · {formatDate(thread.updated_at)}</span>
+                        </div>
+                        <div className="row-tail">
+                          <ChevronRight size={15} />
+                        </div>
+                      </button>
+                    </div>
                   ))}
                   {!visibleThreads.length && <div className="empty">No chats match the current filters.</div>}
                 </div>
@@ -925,7 +1053,7 @@ function App() {
                       {activeProviderItem?.current && <em>detected, not saved</em>}
                     </div>
                   </div>
-                  <button className="primary compact" onClick={() => {
+                  <button className="primary" onClick={() => {
                     setNewProvider({
                       label: "",
                       configText: defaultProviderConfig("custom"),
@@ -976,29 +1104,43 @@ function App() {
 
             {view === "backups" && (
               <>
-                <div className="pane-head backup-pane-head">
+                <div className="pane-head">
                   <div>
                     <h1>{backupCategoryTitle(backupCategory)}</h1>
                     <p>{filteredBackups.length} of {backups.length} restorable snapshots</p>
                   </div>
-                  <div className={`pane-actions backup-select-tools ${selectedBackups.length ? "has-selection" : ""}`}>
-                    <label className="backup-select-all">
-                      <input checked={allVisibleBackupsSelected} disabled={!filteredBackups.length} onChange={(event) => toggleVisibleBackupSelection(event.currentTarget.checked)} type="checkbox" />
-                      <span>All</span>
+                  {filteredBackups.length > 0 && (
+                    <div className="pane-actions">
+                      <button className={`select-toggle ${selectMode ? "on" : ""}`} onClick={() => selectMode ? exitSelectMode() : setSelectMode(true)} type="button">{selectMode ? "Done" : "Select"}</button>
+                    </div>
+                  )}
+                </div>
+                {selectMode && filteredBackups.length > 0 && (
+                  <div className={`select-bar ${selectedBackups.length ? "active" : ""}`}>
+                    <label className="select-check">
+                      <input
+                        ref={(el) => { if (el) el.indeterminate = selectedVisibleBackupCount > 0 && !allVisibleBackupsSelected; }}
+                        checked={allVisibleBackupsSelected}
+                        onChange={(event) => toggleVisibleBackupSelection(event.currentTarget.checked)}
+                        type="checkbox"
+                      />
+                      <span>{selectedBackups.length ? `${selectedBackups.length} selected` : "Select all"}</span>
                     </label>
-                    {selectedBackups.length > 0 && <span className="selection-pill">{selectedBackups.length} selected</span>}
                     {selectedBackups.length > 0 && (
-                      <button className="danger ghost compact backup-delete-action" disabled={Boolean(runningAction)} onClick={() => setModal({
-                        title: "Delete selected backups",
-                        body: backupBulkDeleteMessage(selectedBackups),
-                        confirmLabel: `Delete ${selectedBackups.length}`,
-                        tone: "danger",
-                        action: deleteSelectedBackups
-                      })} title="Delete selected backups" type="button"><Trash2 size={14} /> Delete</button>
+                      <div className="select-bar-actions">
+                        <button className="link-button" onClick={() => setSelectedBackupPaths(new Set())} type="button">Clear</button>
+                        <button className="danger ghost compact" disabled={Boolean(runningAction)} onClick={() => setModal({
+                          title: "Delete selected backups",
+                          body: backupBulkDeleteMessage(selectedBackups),
+                          confirmLabel: `Delete ${selectedBackups.length}`,
+                          tone: "danger",
+                          action: deleteSelectedBackups
+                        })} type="button"><Trash2 size={14} /> Delete {selectedBackups.length}</button>
+                      </div>
                     )}
                   </div>
-                </div>
-                <div className="rows">
+                )}
+                <div className={`rows ${selectMode ? "selecting" : ""}`}>
                   {backupCategory === "chats"
                     ? groupedChatBackups.map((group) => (
                       <div className="backup-group" key={group.key}>
@@ -1011,11 +1153,11 @@ function App() {
                           <em title={`${group.backups.length} backup snapshot${group.backups.length === 1 ? "" : "s"}`}>{group.backups.length}</em>
                         </button>
                         {expandedBackupGroups.has(group.key) && group.backups.map((backup) => (
-                          <div className={`row backup-select-row backup-row-nested ${selectedBackup?.path === backup.path ? "selected" : ""} ${selectedBackupPaths.has(backup.path) ? "checked" : ""}`} key={backup.path}>
+                          <div className={`row select-row backup-row-nested ${!selectMode && selectedBackup?.path === backup.path ? "selected" : ""} ${selectMode && selectedBackupPaths.has(backup.path) ? "checked" : ""}`} key={backup.path}>
                             <label className="check-cell" title="Select backup">
                               <input aria-label={`Select ${backupRowTitle(backup)}`} checked={selectedBackupPaths.has(backup.path)} onChange={(event) => toggleBackupSelection(backup.path, event.currentTarget.checked)} type="checkbox" />
                             </label>
-                            <button className="row-content" onClick={() => setSelectedBackupPath(backup.path)} type="button">
+                            <button className="row-content" onClick={() => selectMode ? toggleBackupSelection(backup.path, !selectedBackupPaths.has(backup.path)) : setSelectedBackupPath(backup.path)} type="button">
                               <div className="row-main">
                                 <strong>{backupRowTitle(backup)}</strong>
                                 <span>{backupRowSubtitle(backup)}</span>
@@ -1029,11 +1171,11 @@ function App() {
                       </div>
                     ))
                     : filteredBackups.map((backup) => (
-                      <div className={`row backup-select-row ${selectedBackup?.path === backup.path ? "selected" : ""} ${selectedBackupPaths.has(backup.path) ? "checked" : ""}`} key={backup.path}>
+                      <div className={`row select-row ${!selectMode && selectedBackup?.path === backup.path ? "selected" : ""} ${selectMode && selectedBackupPaths.has(backup.path) ? "checked" : ""}`} key={backup.path}>
                         <label className="check-cell" title="Select backup">
                           <input aria-label={`Select ${backupTitle(backup)}`} checked={selectedBackupPaths.has(backup.path)} onChange={(event) => toggleBackupSelection(backup.path, event.currentTarget.checked)} type="checkbox" />
                         </label>
-                        <button className="row-content" onClick={() => setSelectedBackupPath(backup.path)} type="button">
+                        <button className="row-content" onClick={() => selectMode ? toggleBackupSelection(backup.path, !selectedBackupPaths.has(backup.path)) : setSelectedBackupPath(backup.path)} type="button">
                           <div className="row-main">
                             <strong>{backupTitle(backup)}</strong>
                             <span>{backupSubtitle(backup)}</span>
@@ -1081,7 +1223,7 @@ function App() {
               <ThreadDetail thread={selectedThread} selectedProject={selectedProject} onDeleteThread={() => setModal({ title: "Delete chat", body: `${selectedThread.title || "(untitled)"}\n${shortPath(selectedThread.cwd)}`, confirmLabel: "Delete", tone: "danger", action: () => runMutation("thread:trash", { threadId: selectedThread.id }, "Chat moved to backup") })} onDeleteProject={() => selectedProject && setModal({ title: "Delete project", body: `${shortPath(selectedProject)}\nAll exact-cwd chats move into a restorable backup.`, confirmLabel: "Delete", tone: "danger", action: () => runMutation("project:delete", { project: selectedProject }, "Project deleted") })} />
             )}
             {view === "providers" && (
-              <ProviderDetail item={selectedProviderItem} config={config} files={providerFiles} expandedFiles={expandedFiles} setExpandedFiles={setExpandedFiles} onUseOfficial={() => setModal({ title: "Switch to OpenAI Official", body: officialSwitchMessage(config?.officialAuthSnapshot), confirmLabel: "Switch", tone: "primary", action: () => runMutation("provider:useOfficial", {}, "Switched to OpenAI Official") })} onUseProfile={(profile) => setModal({ title: `Switch to ${profile.label}`, body: profile.hasAuth ? "This writes config.toml and auth.json from the profile snapshot." : "This writes config.toml. auth.json is unchanged.", confirmLabel: "Switch", tone: "primary", action: () => runMutation("profile:switch", { profileId: profile.id }, "Profile switched") })} onEdit={openProfileEditor} onDelete={(profile) => setModal({ title: "Delete profile", body: [`Delete saved profile \"${profile.label}\"?`, "", `Provider id: ${profile.providerId || "unknown"}`, "Chats already tagged with this provider are not deleted.", "If this provider id still appears in chat history, Sync Chat can move chats to or away from it later. The saved config/auth snapshot will be removed."].join("\n"), confirmLabel: "Delete", tone: "danger", action: () => runMutation("profile:delete", { id: profile.id }, "Profile deleted") })} />
+              <ProviderDetail item={selectedProviderItem} config={config} files={providerFiles} expandedFiles={expandedFiles} setExpandedFiles={setExpandedFiles} onUseOfficial={() => setModal({ title: "Switch to OpenAI Official", body: officialSwitchMessage(config?.officialAuthSnapshot), confirmLabel: "Switch", tone: "primary", action: () => runMutation("provider:useOfficial", {}, "Switched to OpenAI Official") })} onUseProfile={(profile) => setModal({ title: `Switch to ${profile.label}`, body: profile.hasAuth ? "This writes config.toml and auth.json from the profile snapshot." : "This writes config.toml. auth.json is unchanged.", confirmLabel: "Switch", tone: "primary", action: () => runMutation("profile:switch", { profileId: profile.id }, "Profile switched") })} onImportCurrent={importCurrentProvider} onEdit={openProfileEditor} onDelete={(profile) => setModal({ title: "Delete profile", body: [`Delete saved profile \"${profile.label}\"?`, "", `Provider id: ${profile.providerId || "unknown"}`, "Chats already tagged with this provider are not deleted.", "If this provider id still appears in chat history, Sync Chat can move chats to or away from it later. The saved config/auth snapshot will be removed."].join("\n"), confirmLabel: "Delete", tone: "danger", action: () => runMutation("profile:delete", { id: profile.id }, "Profile deleted") })} />
             )}
             {view === "sync" && (
               <SyncDetail
@@ -1119,6 +1261,13 @@ function App() {
                   confirmLabel: "Restore",
                   tone: scope === "metadata" ? "danger" : "primary",
                   action: () => runMutation("backup:restore", { backupDir: selectedBackup.path, scope }, "Backup restored")
+                })}
+                onDelete={() => selectedBackup && setModal({
+                  title: "Delete backup",
+                  body: backupDeleteMessage(selectedBackup),
+                  confirmLabel: "Delete",
+                  tone: "danger",
+                  action: () => runMutation("backup:delete", { backupDir: selectedBackup.path }, "Backup deleted")
                 })}
               />
             )}

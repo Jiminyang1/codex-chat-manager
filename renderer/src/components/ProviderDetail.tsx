@@ -21,6 +21,7 @@ function ProviderDetail({
   setExpandedFiles,
   onUseOfficial,
   onUseProfile,
+  onImportCurrent,
   onEdit,
   onDelete
 }: {
@@ -31,6 +32,7 @@ function ProviderDetail({
   setExpandedFiles: Dispatch<SetStateAction<ExpandedFiles>>;
   onUseOfficial: () => void;
   onUseProfile: (profile: ProviderProfile) => void;
+  onImportCurrent: () => void;
   onEdit: (profile: ProviderProfile) => void;
   onDelete: (profile: ProviderProfile) => void;
 }) {
@@ -63,19 +65,19 @@ function ProviderDetail({
         <span>Active config</span><strong>{config?.modelProvider ?? "-"}</strong>
         <span>Bearer</span><strong>{config?.bearer?.present ? config.bearer.masked : "none"}</strong>
       </div>
-      {!isCurrent && (
-        <div className="actions">
-          {isOfficial ? (
-            <button className="primary" onClick={onUseOfficial} disabled={item.active} type="button">Use</button>
-          ) : (
-            <>
-              <button className="primary" onClick={() => profile && onUseProfile(profile)} disabled={item.active || !profile} type="button">Use</button>
-              <button onClick={() => profile && onEdit(profile)} disabled={!profile} type="button">Edit</button>
-              <button className="danger-text" onClick={() => profile && onDelete(profile)} disabled={!profile} type="button">Delete</button>
-            </>
-          )}
-        </div>
-      )}
+      <div className="actions">
+        {isCurrent ? (
+          <button className="primary" onClick={onImportCurrent} type="button">Import</button>
+        ) : isOfficial ? (
+          <button className="primary" onClick={onUseOfficial} disabled={item.active} type="button">Use</button>
+        ) : (
+          <>
+            <button className="primary" onClick={() => profile && onUseProfile(profile)} disabled={item.active || !profile} type="button">Use</button>
+            <button onClick={() => profile && onEdit(profile)} disabled={!profile} type="button">Edit</button>
+            <button className="danger ghost" onClick={() => profile && onDelete(profile)} disabled={!profile} type="button">Delete</button>
+          </>
+        )}
+      </div>
       <ProviderFiles files={files} expandedFiles={expandedFiles} setExpandedFiles={setExpandedFiles} isOfficial={isOfficial} isCurrent={isCurrent} />
     </div>
   );

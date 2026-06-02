@@ -13,7 +13,10 @@ export async function invoke<Action extends ActionName>(
   }
   const response = await fetch("/api/action", {
     method: "POST",
-    headers: { "content-type": "application/json" },
+    headers: {
+      "content-type": "application/json",
+      "x-codex-manager-token": window.__CODEX_MANAGER_TOKEN__ ?? ""
+    },
     body: JSON.stringify({ action, payload: fullPayload })
   });
   const data = await response.json();

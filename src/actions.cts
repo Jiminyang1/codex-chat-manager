@@ -44,6 +44,9 @@ export const actionPayloadSchemas = {
   "thread:trash": mutationPayload.extend({
     threadId: z.string().min(1, "threadId is required")
   }),
+  "threads:trash": mutationPayload.extend({
+    threadIds: z.array(z.string().min(1)).min(1, "threadIds is required")
+  }),
   "project:delete": mutationPayload.extend({
     project: z.string().min(1, "project is required")
   }),
@@ -73,7 +76,7 @@ export const actionPayloadSchemas = {
     profileId: z.string().min(1, "profileId is required")
   }),
   "profile:save": basePayload.extend({
-    label: z.string().min(1, "label is required"),
+    label: z.string().optional(),
     note: z.string().optional(),
     kind: z.string().optional()
   }),
@@ -114,6 +117,7 @@ export interface ActionResultMap {
   "codex:processStatus": ProcessStatus;
   "codex:quit": { requested: boolean; reason?: string };
   "thread:trash": MutationResult;
+  "threads:trash": MutationResult;
   "project:delete": MutationResult;
   "backup:restore": MutationResult;
   "backup:delete": MutationResult;

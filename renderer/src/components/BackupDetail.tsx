@@ -1,4 +1,4 @@
-import { ArchiveRestore } from "lucide-react";
+import { ArchiveRestore, Trash2 } from "lucide-react";
 import { formatDate, shortPath } from "../lib/format";
 import {
   backupChatLocation,
@@ -11,10 +11,11 @@ import {
 } from "../lib/backup-helpers";
 import type { BackupScope, BackupSummary, Thread } from "../../../src/types";
 
-function BackupDetail({ backup, activeProvider, onRestore }: {
+function BackupDetail({ backup, activeProvider, onRestore, onDelete }: {
   backup: BackupSummary | null;
   activeProvider: string;
   onRestore: (scope: BackupScope) => void;
+  onDelete: () => void;
 }) {
   if (!backup) {
     return <div className="detail-empty"><ArchiveRestore size={28} /><p>Select a backup.</p></div>;
@@ -80,6 +81,9 @@ function BackupDetail({ backup, activeProvider, onRestore }: {
             <ArchiveRestore size={15} /> {backupScopeLabel(primaryScope)}
           </button>
         )}
+        <button className="danger ghost wide" onClick={onDelete} type="button">
+          <Trash2 size={15} /> Delete backup
+        </button>
       </div>
 
       {backup.category !== "chats" && (

@@ -85,6 +85,14 @@ function backupBulkDeleteMessage(backups: BackupSummary[]): string {
   ].join("\n");
 }
 
+function backupDeleteMessage(backup: BackupSummary): string {
+  return [
+    `${backupTitle(backup)} · ${formatBackupDate(backup.createdAt)}`,
+    "",
+    "This permanently removes this backup snapshot. Restoring from it will no longer be possible."
+  ].join("\n");
+}
+
 function backupTitle(backup: BackupSummary | null | undefined): string {
   if (backup?.category === "chats") {
     const chats = backup.chatSummaries ?? [];
@@ -182,6 +190,7 @@ function backupSubtitle(backup: BackupSummary | null | undefined): string {
 export {
   backupChatLocation,
   backupBulkDeleteMessage,
+  backupDeleteMessage,
   backupFilesSummary,
   backupGroupMeta,
   backupKindLabel,
