@@ -1,6 +1,6 @@
 {
   "name": "codex-chat-manager",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Safe local manager for Codex Desktop projects and chat history.",
   "type": "module",
   "bin": {

@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.1 - 2026-06-03
+
+- Fix provider management edge cases around detected third-party configs, imports, active status, and destructive actions.
+- Add macOS Electron release packaging with branded app icons, DMG/ZIP artifacts, and release documentation.
+
 ## 0.1.0 - 2026-05-31
 
 - Add CLI for inspecting Codex Desktop local chat storage.
