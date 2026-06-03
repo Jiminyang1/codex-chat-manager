@@ -10,3 +10,4 @@ release/
 *.tgz
 .env
 .env.*
+.claude/
